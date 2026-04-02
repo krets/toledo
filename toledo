@@ -1,0 +1,659 @@
+#!/usr/bin/env python3
+"""
+Toledo - A file-based task manager CLI
+
+Config:  ~/.toledo.json              (tasks_dir key)
+Tasks:   ~/.toledo/tasks/            (default)
+Context: ~/.toledo/.context
+
+Usage examples:
+    toledo init
+    toledo new "Fix login bug" -p 10 -c WEB --due 2026-04-15
+    toledo new "Weekly review" -p 20 -c GEN --recur 7
+    toledo status
+    toledo ctx fix-login
+    toledo sub "Write unit tests" -p 20
+    toledo note "Found the issue in auth.py line 42"
+    toledo done fix-login
+    toledo cancel weekly-review
+    toledo log
+    toledo proj                    (list)
+    toledo proj WEB "Web Frontend"  (add)
+    toledo proj -r WEB              (remove)
+"""
+
+import argparse
+import json
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".toledo.json"
+DEFAULT_TASKS_DIR = Path.home() / ".toledo" / "tasks"
+CONTEXT_FILE = Path.home() / ".toledo" / ".context"
+
+STATES = ["active", "completed", "archive"]
+SUBTASK_STATES = ["active", "completed"]
+
+
+# ── Config & helpers ──────────────────────────────────────────────────────────
+
+def load_config():
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    return {"tasks_dir": str(DEFAULT_TASKS_DIR)}
+
+def get_tasks_dir():
+    return Path(load_config().get("tasks_dir", DEFAULT_TASKS_DIR))
+
+def ensure_dir(path):
+    path.mkdir(parents=True, exist_ok=True)
+
+def init_tasks_dir():
+    for state in STATES:
+        ensure_dir(get_tasks_dir() / state)
+    ensure_dir(Path.home() / ".toledo")
+
+def load_projects():
+    pf = get_tasks_dir() / "projects.json"
+    return json.loads(pf.read_text()) if pf.exists() else {}
+
+def save_projects(p):
+    pf = get_tasks_dir() / "projects.json"
+    pf.write_text(json.dumps(p, indent=2))
+
+def make_task_slug(priority, project_code, name):
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return f"{priority:02d}-{project_code.upper()}-{slug}"
+
+def parse_task_slug(slug):
+    parts = slug.split("-", 2)
+    if len(parts) < 3:
+        return {"priority": 0, "project": "??", "name": slug}
+    return {
+        "priority": int(parts[0]) if parts[0].isdigit() else 0,
+        "project": parts[1],
+        "name": parts[2].replace("-", " "),
+    }
+
+def find_task(partial):
+    for state in STATES:
+        sd = get_tasks_dir() / state
+        if not sd.exists():
+            continue
+        for folder in sd.iterdir():
+            if folder.is_dir() and partial.lower() in folder.name.lower():
+                return folder, state
+    return None
+
+def append_log(task_folder, action, **kwargs):
+    entry = {"ts": datetime.now().isoformat(), "action": action, **kwargs}
+    with open(task_folder / "activity.log", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+def get_context():
+    return CONTEXT_FILE.read_text().strip() if CONTEXT_FILE.exists() else None
+
+def set_context(slug):
+    ensure_dir(CONTEXT_FILE.parent)
+    CONTEXT_FILE.write_text(slug)
+
+def clear_context():
+    if CONTEXT_FILE.exists():
+        CONTEXT_FILE.unlink()
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+def cmd_init(args):
+    init_tasks_dir()
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(json.dumps({"tasks_dir": str(DEFAULT_TASKS_DIR)}, indent=2))
+    print(f"✓ Toledo initialized at {get_tasks_dir()}")
+
+
+def cmd_new(args):
+    init_tasks_dir()
+    priority = args.priority or 50
+    project = (args.project or "GEN").upper()
+    slug = make_task_slug(priority, project, args.name)
+    state = "active"
+    task_folder = get_tasks_dir() / state / slug
+
+    if task_folder.exists():
+        print(f"✗ Task '{slug}' already exists in {state}/"); return
+
+    ensure_dir(task_folder)
+    desc = args.description or f"# {args.name}\n\n_No description provided._\n"
+    if not desc.startswith("#"):
+        desc = f"# {args.name}\n\n{desc}\n"
+    (task_folder / "description.md").write_text(desc)
+    if args.due:
+        (task_folder / "due.txt").write_text(args.due)
+    if args.recur:
+        (task_folder / "recurrence.txt").write_text(str(args.recur))
+    append_log(task_folder, "created", state=state, priority=priority, project=project)
+    print(f"✓ Created '{slug}' in {state}/")
+    if args.recur:
+        print(f"  Recurs every {args.recur} day(s)")
+
+
+def is_overdue(task_folder):
+    df = task_folder / "due.txt"
+    if not df.exists(): return False
+    try:
+        return df.read_text().strip() < datetime.now().strftime("%Y-%m-%d")
+    except Exception:
+        return False
+
+
+def cmd_status(args):
+    projects = load_projects()
+    project_filter = getattr(args, "project", None)
+    if project_filter:
+        project_filter = project_filter.upper()
+    lines = ["# Toledo Task Status\n",
+             f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n"]
+    if project_filter:
+        label = projects.get(project_filter, project_filter)
+        lines.append(f"_Project filter: `{project_filter}` — {label}_\n")
+    show = STATES if getattr(args, "all", False) else ["active", "completed"]
+
+    for state in show:
+        sd = get_tasks_dir() / state
+        if not sd.exists(): continue
+        tasks = [f for f in sd.iterdir() if f.is_dir()]
+        if project_filter:
+            tasks = [t for t in tasks if parse_task_slug(t.name)["project"] == project_filter]
+        if not tasks: continue
+
+        def sort_key(t):
+            info = parse_task_slug(t.name)
+            df = t / "due.txt"
+            return (info["priority"], df.read_text().strip() if df.exists() else "9999")
+
+        tasks.sort(key=sort_key)
+        lines.append(f"\n## {state.capitalize()}\n")
+
+        for task in tasks:
+            info = parse_task_slug(task.name)
+            df = task / "due.txt"
+            rf = task / "recurrence.txt"
+            due_str = df.read_text().strip() if df.exists() else None
+            overdue = due_str and due_str < datetime.now().strftime("%Y-%m-%d")
+            due_s = f" · due {due_str}" if due_str else ""
+            if overdue: due_s += " ⚠ OVERDUE"
+            rec_s = f" · every {rf.read_text().strip()}d" if rf.exists() else ""
+            lines.append(f"- **[{info['priority']:02d}]** `{info['project']}` "
+                         f"{info['name'].title()}{due_s}{rec_s}")
+            for ss in SUBTASK_STATES:
+                sub_dir = task / "subtasks" / ss
+                if sub_dir.exists():
+                    for sub in sorted(sub_dir.iterdir()):
+                        if sub.is_dir():
+                            si = parse_task_slug(sub.name)
+                            check = "x" if ss == "completed" else " "
+                            lines.append(f"  - [{check}] {si['name'].title()}")
+
+    print("\n".join(lines))
+
+
+def cmd_move(args):
+    r = find_task(args.task)
+    if not r: print(f"✗ Task '{args.task}' not found."); return
+    task_folder, cur = r
+    new_folder = get_tasks_dir() / args.to / task_folder.name
+    task_folder.rename(new_folder)
+    append_log(new_folder, "state_changed", from_state=cur, to_state=args.to)
+    print(f"✓ Moved '{task_folder.name}': {cur} → {args.to}")
+
+
+def cmd_done(args):
+    r = find_task(args.task)
+    if not r: print(f"✗ Task '{args.task}' not found."); return
+    task_folder, cur = r
+    rf = task_folder / "recurrence.txt"
+    if rf.exists():
+        days = int(rf.read_text().strip())
+        new_due = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+        (task_folder / "due.txt").write_text(new_due)
+        append_log(task_folder, "completed_recurring", next_due=new_due)
+        print(f"✓ Done. Next due: {new_due}")
+    else:
+        nf = get_tasks_dir() / "completed" / task_folder.name
+        task_folder.rename(nf)
+        append_log(nf, "state_changed", from_state=cur, to_state="completed")
+        print(f"✓ Completed '{task_folder.name}'")
+
+
+def cmd_cancel(args):
+    r = find_task(args.task)
+    if not r: print(f"✗ Task '{args.task}' not found."); return
+    task_folder, cur = r
+    if not (task_folder / "recurrence.txt").exists():
+        print(f"✗ '{task_folder.name}' is not a recurring task. Use 'move' instead."); return
+    nf = get_tasks_dir() / "completed" / task_folder.name
+    task_folder.rename(nf)
+    append_log(nf, "recurring_cancelled")
+    print(f"✓ Cancelled recurring task → completed/")
+
+
+def cmd_ctx(args):
+    task_arg = getattr(args, "task", "show") or "show"
+    if task_arg == "clear":
+        clear_context(); print("✓ Context cleared."); return
+    if task_arg == "show":
+        ctx = get_context()
+        print(f"Context: {ctx}" if ctx else "No context set."); return
+    r = find_task(task_arg)
+    if not r: print(f"✗ Task '{task_arg}' not found."); return
+    task_folder, state = r
+    set_context(task_folder.name)
+    print(f"✓ Context → '{task_folder.name}' ({state})")
+
+
+def cmd_sub(args):
+    ctx = get_context()
+    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Context task '{ctx}' not found."); return
+    task_folder, _ = r
+    p = args.priority or 50
+    slug = f"{p:02d}-{re.sub(r'[^a-z0-9]+', '-', args.name.lower()).strip('-')}"
+    sf = task_folder / "subtasks" / "active" / slug
+    ensure_dir(sf)
+    (sf / "description.md").write_text(args.description or f"# {args.name}\n\n_No description._\n")
+    if args.due:
+        (sf / "due.txt").write_text(args.due)
+    append_log(task_folder, "subtask_created", subtask=slug)
+    print(f"✓ Added subtask '{slug}'")
+
+
+def cmd_note(args):
+    ctx = get_context()
+    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Context task '{ctx}' not found."); return
+    task_folder, _ = r
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(task_folder / "worklog.md", "a") as f:
+        f.write(f"\n### {ts}\n\n{args.text}\n")
+    append_log(task_folder, "note_added")
+    print(f"✓ Note appended to worklog")
+
+
+def cmd_edit(args):
+    ctx = getattr(args, "task", None) or get_context()
+    if not ctx: print("✗ No task/context."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Task '{ctx}' not found."); return
+    task_folder, _ = r
+    df = task_folder / "description.md"
+    if df.exists():
+        ad = task_folder / "description_archive"
+        ensure_dir(ad)
+        df.rename(ad / f"description_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+    df.write_text(args.text)
+    append_log(task_folder, "description_updated")
+    print(f"✓ Description updated (old version archived)")
+
+
+def cmd_due(args):
+    ctx = getattr(args, "task", None) or get_context()
+    if not ctx: print("✗ No task/context."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Task '{ctx}' not found."); return
+    task_folder, _ = r
+    (task_folder / "due.txt").write_text(args.date)
+    append_log(task_folder, "due_date_set", date=args.date)
+    print(f"✓ Due date → {args.date}")
+
+
+def cmd_proj(args):
+    projects = load_projects()
+    if getattr(args, "remove", None):
+        code = args.remove.upper()
+        if code not in projects:
+            print(f"✗ Project '{code}' not found."); return
+        del projects[code]
+        save_projects(projects)
+        print(f"✓ Removed project '{code}'")
+        return
+    if getattr(args, "list", False) or not (getattr(args, "code", None) and getattr(args, "name", None)):
+        if not projects: print("No projects defined.")
+        else:
+            for code, name in sorted(projects.items()):
+                print(f"  {code:8s}  {name}")
+        return
+    projects[args.code.upper()] = args.name
+    save_projects(projects)
+    print(f"✓ Project '{args.code.upper()}' = '{args.name}'")
+
+
+def cmd_show(args):
+    ctx = getattr(args, "task", None) or get_context()
+    if not ctx: print("✗ No task/context."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Task '{ctx}' not found."); return
+    task_folder, _ = r
+    df = task_folder / "description.md"
+    if not df.exists(): print("No description."); return
+    print(df.read_text())
+
+
+def cmd_search(args):
+    query = args.query.lower()
+    found = False
+    for state in STATES:
+        sd = get_tasks_dir() / state
+        if not sd.exists(): continue
+        for task in sorted(sd.iterdir()):
+            if not task.is_dir(): continue
+            hits = []
+            if query in task.name.lower():
+                hits.append("name")
+            for fname in ("description.md", "worklog.md"):
+                f = task / fname
+                if f.exists() and query in f.read_text().lower():
+                    hits.append(fname)
+            if hits:
+                found = True
+                info = parse_task_slug(task.name)
+                df = task / "due.txt"
+                due_s = f" · due {df.read_text().strip()}" if df.exists() else ""
+                print(f"[{state}] **[{info['priority']:02d}]** `{info['project']}` "
+                      f"{info['name'].title()}{due_s}  ({', '.join(hits)})")
+    if not found:
+        print(f"No tasks matching '{args.query}'.")
+
+
+def cmd_subdone(args):
+    ctx = get_context()
+    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Context task '{ctx}' not found."); return
+    task_folder, _ = r
+    active_dir = task_folder / "subtasks" / "active"
+    if not active_dir.exists(): print("No active subtasks."); return
+    matches = [f for f in active_dir.iterdir()
+               if f.is_dir() and args.name.lower() in f.name.lower()]
+    if not matches:
+        print(f"✗ No active subtask matching '{args.name}'."); return
+    if len(matches) > 1:
+        print(f"✗ Ambiguous — matches: {', '.join(f.name for f in matches)}"); return
+    sub = matches[0]
+    done_dir = task_folder / "subtasks" / "completed"
+    ensure_dir(done_dir)
+    sub.rename(done_dir / sub.name)
+    append_log(task_folder, "subtask_completed", subtask=sub.name)
+    print(f"✓ Subtask '{sub.name}' marked complete")
+
+
+def cmd_upcoming(args):
+    days = getattr(args, "days", 7)
+    today = datetime.now().date()
+    cutoff = (today + timedelta(days=days)).strftime("%Y-%m-%d")
+    today_s = today.strftime("%Y-%m-%d")
+    found = False
+    for state in ["active"]:
+        sd = get_tasks_dir() / state
+        if not sd.exists(): continue
+        tasks = [f for f in sd.iterdir() if f.is_dir()]
+        tasks = [t for t in tasks if (t / "due.txt").exists()]
+        tasks = [t for t in tasks if (t / "due.txt").read_text().strip() <= cutoff]
+        tasks.sort(key=lambda t: (t / "due.txt").read_text().strip())
+        for task in tasks:
+            found = True
+            info = parse_task_slug(task.name)
+            due = (task / "due.txt").read_text().strip()
+            overdue = due < today_s
+            tag = " ⚠ OVERDUE" if overdue else (" · today" if due == today_s else f" · due {due}")
+            print(f"[{state}] **[{info['priority']:02d}]** `{info['project']}` "
+                  f"{info['name'].title()}{tag}")
+    if not found:
+        print(f"No tasks due within {days} day(s).")
+
+
+def cmd_archive(args):
+    r = find_task(args.task)
+    if not r: print(f"✗ Task '{args.task}' not found."); return
+    task_folder, cur = r
+    if cur == "archive":
+        print("Already archived."); return
+    nf = get_tasks_dir() / "archive" / task_folder.name
+    task_folder.rename(nf)
+    append_log(nf, "state_changed", from_state=cur, to_state="archive")
+    print(f"✓ Archived '{task_folder.name}'")
+
+
+def cmd_rm(args):
+    r = find_task(args.task)
+    if not r: print(f"✗ Task '{args.task}' not found."); return
+    task_folder, state = r
+    answer = input(f"Delete '{task_folder.name}' ({state}) permanently? [y/N] ")
+    if answer.strip().lower() != "y":
+        print("Aborted."); return
+    import shutil
+    shutil.rmtree(task_folder)
+    print(f"✓ Deleted '{task_folder.name}'")
+
+
+def cmd_reprioritize(args):
+    r = find_task(args.task)
+    if not r: print(f"✗ Task '{args.task}' not found."); return
+    task_folder, state = r
+    old_info = parse_task_slug(task_folder.name)
+    old_pri  = old_info["priority"]
+    new_pri  = args.priority
+    if old_pri == new_pri:
+        print(f"✗ Task already has priority {new_pri}."); return
+    new_slug   = f"{new_pri:02d}-{old_info['project']}-{old_info['name'].replace(' ', '-')}"
+    new_folder = get_tasks_dir() / state / new_slug
+    if new_folder.exists():
+        print(f"✗ A task with slug '{new_slug}' already exists."); return
+    task_folder.rename(new_folder)
+    # Update context if it pointed to the old slug
+    if get_context() == task_folder.name:
+        set_context(new_slug)
+    append_log(new_folder, "reprioritized", old_priority=old_pri, new_priority=new_pri)
+    print(f"✓ '{task_folder.name}' → '{new_slug}'")
+
+
+def cmd_worklog(args):
+    ctx = getattr(args, "task", None) or get_context()
+    if not ctx: print("✗ No task/context."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Task '{ctx}' not found."); return
+    task_folder, _ = r
+    wf = task_folder / "worklog.md"
+    if not wf.exists(): print("No worklog."); return
+    print(wf.read_text())
+
+
+def cmd_log(args):
+    ctx = getattr(args, "task", None) or get_context()
+    if not ctx: print("✗ No task/context."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Task '{ctx}' not found."); return
+    task_folder, _ = r
+    lf = task_folder / "activity.log"
+    if not lf.exists(): print("No activity log."); return
+    print(f"Log for '{task_folder.name}':\n")
+    for line in lf.read_text().splitlines():
+        e = json.loads(line)
+        ts, action = e.pop("ts"), e.pop("action")
+        extras = "  ".join(f"{k}={v}" for k, v in e.items())
+        print(f"  {ts}  {action:<28} {extras}")
+
+
+# ── CLI wiring ────────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(prog="toledo", description="Toledo task manager")
+    s = p.add_subparsers(dest="command")
+
+    s.add_parser("init",
+        help="Initialize Toledo (create task dirs and config)",
+        description="Create the tasks directory structure and ~/.toledo.json config file.")
+
+    pn = s.add_parser("new",
+        help="Create a new task",
+        description="Create a new task. Tasks are stored as folders under active/ or recurring/.")
+    pn.add_argument("name", help="Task title")
+    pn.add_argument("-p","--priority", type=int, default=50,
+        help="Priority (lower = higher priority, default 50)")
+    pn.add_argument("-c","--project", default="GEN",
+        help="Project code (default GEN)")
+    pn.add_argument("-d","--description",
+        help="Task description (Markdown). Defaults to a stub.")
+    pn.add_argument("--due", metavar="YYYY-MM-DD",
+        help="Due date")
+    pn.add_argument("--recur", type=int, metavar="DAYS",
+        help="Make this a recurring task; specify interval in days")
+
+    ps = s.add_parser("status", aliases=["ls"],
+        help="Show all active, recurring, and completed tasks",
+        description="Print a Markdown summary of tasks sorted by priority and due date.")
+    ps.add_argument("-a","--all", action="store_true",
+        help="Include archived tasks as well")
+    ps.add_argument("-c","--project", metavar="CODE",
+        help="Filter tasks by project code")
+
+    pm = s.add_parser("move", aliases=["mv"],
+        help="Move a task to a different state",
+        description="Manually move a task folder to a different state directory.")
+    pm.add_argument("task", help="Partial task name or slug to match")
+    pm.add_argument("to", choices=STATES, help="Target state")
+
+    pd = s.add_parser("done",
+        help="Mark a task as completed",
+        description="Move a task to completed/. For recurring tasks, advances the due date instead.")
+    pd.add_argument("task", help="Partial task name or slug to match")
+
+    pc = s.add_parser("cancel",
+        help="Cancel a recurring task",
+        description="Move a recurring task to completed/ without scheduling its next occurrence.")
+    pc.add_argument("task", help="Partial task name or slug to match")
+
+    px = s.add_parser("ctx",
+        help="Get or set the active task context",
+        description="Set a task as the current context so sub/note/log commands know which task to act on. "
+                    "Use 'ctx clear' to unset, or 'ctx' / 'ctx show' to print the current context.")
+    px.add_argument("task", nargs="?", default="show",
+        help="Partial task name, 'show' (default), or 'clear'")
+
+    psub = s.add_parser("sub",
+        help="Add a subtask to the current context task",
+        description="Create a subtask under the active context task. Use 'ctx' to set the context first.")
+    psub.add_argument("name", help="Subtask title")
+    psub.add_argument("-p","--priority", type=int, default=50,
+        help="Subtask priority (default 50)")
+    psub.add_argument("-d","--description", help="Subtask description (Markdown)")
+    psub.add_argument("--due", metavar="YYYY-MM-DD", help="Subtask due date")
+
+    pnt = s.add_parser("note",
+        help="Append a timestamped note to the current context task",
+        description="Append a note with a timestamp to the task's worklog.md. Use 'ctx' to set context first.")
+    pnt.add_argument("text", help="Note text")
+
+    pe = s.add_parser("edit",
+        help="Replace the description of a task",
+        description="Overwrite a task's description.md (the old version is archived). "
+                    "Uses the current context task unless -t is given.")
+    pe.add_argument("text", help="New description content (Markdown)")
+    pe.add_argument("-t","--task", help="Partial task name or slug (overrides context)")
+
+    pdu = s.add_parser("due",
+        help="Set or update the due date of a task",
+        description="Write a due date to the task's due.txt. "
+                    "Uses the current context task unless -t is given.")
+    pdu.add_argument("date", metavar="YYYY-MM-DD", help="Due date")
+    pdu.add_argument("-t","--task", help="Partial task name or slug (overrides context)")
+
+    pp = s.add_parser("proj",
+        help="Manage project codes",
+        description="List, add, or remove named project codes stored in projects.json. "
+                    "Project codes label tasks (e.g. WEB, OPS). "
+                    "With no arguments, lists all projects.")
+    pp.add_argument("code", nargs="?", help="Project code (e.g. WEB)")
+    pp.add_argument("name", nargs="?", help="Project display name — required when adding")
+    pp.add_argument("-l","--list", action="store_true", help="List all projects")
+    pp.add_argument("-r","--remove", metavar="CODE", help="Remove a project by code")
+
+    psh = s.add_parser("show",
+        help="Print the description of a task",
+        description="Print description.md for a task. "
+                    "Uses the current context task unless -t is given.")
+    psh.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
+
+    psr = s.add_parser("search",
+        help="Search tasks by keyword",
+        description="Search task names, descriptions, and worklogs for a keyword.")
+    psr.add_argument("query", help="Search term")
+
+    psd = s.add_parser("subdone",
+        help="Mark a subtask as completed",
+        description="Move a subtask from subtasks/active to subtasks/completed. "
+                    "Requires a context task to be set.")
+    psd.add_argument("name", help="Partial subtask name to match")
+
+    pup = s.add_parser("upcoming", aliases=["today"],
+        help="Show tasks due soon",
+        description="List active and recurring tasks due within N days (default 7).")
+    pup.add_argument("--days", type=int, default=7, metavar="N",
+        help="Look-ahead window in days (default 7)")
+
+    par = s.add_parser("archive",
+        help="Archive a task",
+        description="Move a task to the archive state (shortcut for 'move <task> archive').")
+    par.add_argument("task", help="Partial task name or slug to match")
+
+    prm = s.add_parser("rm",
+        help="Permanently delete a task",
+        description="Delete a task folder and all its contents. Prompts for confirmation.")
+    prm.add_argument("task", help="Partial task name or slug to match")
+
+    pre = s.add_parser("reprioritize", aliases=["pri"],
+        help="Change the priority of a task",
+        description="Rename the task folder to reflect the new priority and log the change.")
+    pre.add_argument("task", help="Partial task name or slug to match")
+    pre.add_argument("priority", type=int, metavar="PRIORITY", help="New priority value (e.g. 10)")
+
+    pw = s.add_parser("worklog",
+        help="Show the worklog (notes) for a task",
+        description="Print the worklog.md for a task — all notes added via 'note'. "
+                    "Uses the current context task unless a task argument is given.")
+    pw.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
+
+    pl = s.add_parser("log",
+        help="Show the activity log for a task",
+        description="Print timestamped activity log entries for a task. "
+                    "Uses the current context task unless a task argument is given.")
+    pl.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
+
+    args = p.parse_args()
+
+    dispatch = {
+        "init": cmd_init, "new": cmd_new,
+        "status": cmd_status, "ls": cmd_status,
+        "move": cmd_move, "mv": cmd_move,
+        "done": cmd_done, "cancel": cmd_cancel,
+        "ctx": cmd_ctx, "sub": cmd_sub,
+        "note": cmd_note, "edit": cmd_edit,
+        "due": cmd_due, "proj": cmd_proj,
+        "show": cmd_show, "search": cmd_search,
+        "subdone": cmd_subdone,
+        "upcoming": cmd_upcoming, "today": cmd_upcoming,
+        "archive": cmd_archive, "rm": cmd_rm,
+        "reprioritize": cmd_reprioritize, "pri": cmd_reprioritize,
+        "worklog": cmd_worklog, "log": cmd_log,
+    }
+
+    if args.command in dispatch:
+        dispatch[args.command](args)
+    else:
+        p.print_help()
+
+if __name__ == "__main__":
+    main()
