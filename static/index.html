@@ -1,0 +1,1244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#6b9ce8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Toledo">
+<title>Toledo</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/static/icon-192.svg">
+<style>
+:root {
+  --bg:        #0d0d0d;
+  --surface:   #1a1a1a;
+  --surface2:  #242424;
+  --surface3:  #2e2e2e;
+  --accent:    #6b9ce8;
+  --accent-dim:rgba(107,156,232,0.15);
+  --danger:    #e74c3c;
+  --warning:   #f0a500;
+  --success:   #2ecc71;
+  --text:      #e8e8e8;
+  --muted:     #777;
+  --border:    #2a2a2a;
+  --r:         8px;
+  --top:       52px;
+  --nav:       58px;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;line-height:1.5}
+
+/* ── Topbar ── */
+#topbar{
+  position:fixed;top:0;left:0;right:0;height:var(--top);
+  background:var(--surface);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;padding:0 14px;gap:10px;z-index:100;
+}
+#topbar h1{font-size:18px;font-weight:700;color:var(--accent);letter-spacing:-.3px}
+
+/* ── Main scroll area ── */
+#main{
+  position:fixed;top:var(--top);bottom:calc(var(--nav) + env(safe-area-inset-bottom));
+  left:0;right:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+}
+
+/* ── Bottom nav ── */
+#bottomnav{
+  position:fixed;bottom:0;left:0;right:0;
+  height:calc(var(--nav) + env(safe-area-inset-bottom));
+  padding-bottom:env(safe-area-inset-bottom);
+  background:var(--surface);border-top:1px solid var(--border);
+  display:flex;z-index:100;
+}
+.nav-btn{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:3px;background:none;border:none;color:var(--muted);
+  font-size:10px;font-weight:500;cursor:pointer;transition:color .15s;padding:6px 0;
+}
+.nav-btn.active{color:var(--accent)}
+.nav-btn svg{width:22px;height:22px;stroke-width:1.8;fill:none;stroke:currentColor}
+
+/* ── FAB ── */
+#fab{
+  position:fixed;bottom:calc(var(--nav) + env(safe-area-inset-bottom) + 14px);right:16px;
+  width:50px;height:50px;border-radius:50%;background:var(--accent);color:#fff;border:none;
+  font-size:26px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 16px rgba(107,156,232,.45);z-index:99;transition:transform .15s;
+}
+#fab:active{transform:scale(.93)}
+
+/* ── State tabs (task view primary filter) ── */
+.state-tabs{
+  display:flex;background:var(--surface);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:10;
+}
+.state-tab{
+  flex:1;padding:10px 4px;background:none;border:none;
+  color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;
+  border-bottom:2px solid transparent;transition:all .15s;font-family:inherit;
+  text-transform:uppercase;letter-spacing:.3px;
+}
+.state-tab.on{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* ── Project filter bar ── */
+.proj-bar{
+  display:flex;align-items:center;gap:8px;padding:8px 12px;
+  border-bottom:1px solid var(--border);position:relative;
+}
+.proj-filter-btn{
+  display:flex;align-items:center;gap:5px;background:var(--surface2);
+  border:1px solid var(--border);border-radius:6px;
+  padding:5px 11px;font-size:12px;font-weight:500;color:var(--text);
+  cursor:pointer;font-family:inherit;transition:border-color .15s;
+}
+.proj-filter-btn.has-filter{border-color:var(--accent);color:var(--accent)}
+.proj-filter-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0}
+.proj-dropdown{
+  position:absolute;top:calc(100% - 1px);left:12px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);z-index:50;min-width:180px;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);
+  display:none;overflow:hidden;
+}
+.proj-dropdown.open{display:block}
+.proj-option{
+  padding:10px 14px;font-size:13px;cursor:pointer;transition:background .1s;
+  border-bottom:1px solid var(--border);
+}
+.proj-option:last-child{border-bottom:none}
+.proj-option:hover{background:var(--surface2)}
+.proj-option.on{color:var(--accent);font-weight:600}
+
+/* ── Task cards ── */
+.card{
+  margin:4px 10px;padding:8px 12px;
+  background:var(--surface);border-radius:var(--r);
+  border:1px solid var(--border);cursor:pointer;transition:border-color .15s;
+}
+.card:active{border-color:var(--accent)}
+.card-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pri-badge{
+  font-size:10px;font-weight:700;padding:2px 6px;
+  border-radius:4px;color:#fff;flex-shrink:0;text-transform:uppercase;letter-spacing:.4px;
+}
+.proj-tag{
+  font-size:11px;font-weight:600;padding:2px 7px;border-radius:4px;
+  background:var(--accent-dim);color:var(--accent);flex-shrink:0;
+}
+.task-name{font-size:14px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-meta{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:3px}
+.due{font-size:12px;color:var(--muted)}
+.due.over{color:var(--danger);font-weight:600}
+.rec-tag{font-size:11px;color:#9b59b6}
+.sub-count{font-size:11px;color:var(--muted)}
+.state-tag{font-size:11px;padding:2px 6px;border-radius:4px}
+.s-active{background:var(--accent-dim);color:var(--accent)}
+.s-completed{background:rgba(46,204,113,.15);color:var(--success)}
+.s-archive{background:rgba(136,136,136,.12);color:var(--muted)}
+
+/* ── Section label ── */
+.sec{padding:12px 14px 4px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+
+/* ── Empty state ── */
+.empty{text-align:center;color:var(--muted);padding:48px 24px}
+.empty-icon{font-size:40px;margin-bottom:8px}
+.empty p{font-size:14px}
+
+/* ── Search bar ── */
+.search-wrap{padding:10px 12px;position:sticky;top:0;background:var(--bg);z-index:10}
+#search-input{
+  width:100%;background:var(--surface);border:1px solid var(--border);
+  border-radius:10px;padding:9px 14px;color:var(--text);font-size:15px;
+  outline:none;font-family:inherit;transition:border-color .15s;
+}
+#search-input:focus{border-color:var(--accent)}
+
+/* ── Projects view ── */
+.proj-row{display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border);gap:12px}
+.proj-code{font-size:13px;font-weight:700;color:var(--accent);min-width:72px}
+.proj-name{flex:1;font-size:14px}
+.icon-btn{background:none;border:none;color:var(--muted);cursor:pointer;padding:6px;border-radius:4px;line-height:1;font-size:16px;transition:color .15s}
+.icon-btn:hover{color:var(--danger)}
+
+/* ── Detail panel ── */
+#panel{
+  position:fixed;top:0;right:0;bottom:0;width:100%;max-width:620px;
+  background:var(--bg);z-index:200;
+  transform:translateX(100%);transition:transform .26s cubic-bezier(.4,0,.2,1);
+  display:flex;flex-direction:column;overflow:hidden;
+  border-left:1px solid var(--border);
+}
+#panel.open{transform:translateX(0)}
+
+/* Panel header */
+.panel-head{
+  background:var(--surface);border-bottom:1px solid var(--border);
+  padding:11px 14px;display:flex;align-items:flex-start;gap:10px;flex-shrink:0;
+}
+.panel-back{background:none;border:none;color:var(--accent);cursor:pointer;padding:4px;flex-shrink:0;font-size:20px;line-height:1;margin-top:1px}
+.panel-info{flex:1;min-width:0}
+.panel-info h2{font-size:16px;font-weight:600;word-break:break-word}
+
+/* Panel inline meta (tappable due / priority / project) */
+.panel-meta{
+  display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;
+}
+.meta-pill{
+  display:flex;align-items:center;gap:4px;
+  background:var(--surface2);border:1px solid var(--border);
+  border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;
+  transition:border-color .15s;
+}
+.meta-pill:hover{border-color:var(--accent)}
+.meta-pill.over{border-color:rgba(231,76,60,.4);color:var(--danger)}
+.meta-pill .lbl{color:var(--muted);font-size:11px}
+.meta-pill .val{font-weight:500}
+.meta-pill svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;color:var(--muted)}
+
+/* Panel action strip */
+.panel-actions{
+  display:flex;gap:6px;padding:8px 12px;
+  background:var(--surface);border-bottom:1px solid var(--border);
+  overflow-x:auto;scrollbar-width:none;flex-shrink:0;flex-wrap:wrap;
+}
+.panel-actions::-webkit-scrollbar{display:none}
+.abtn{
+  padding:6px 14px;border-radius:6px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--text);font-size:13px;
+  cursor:pointer;white-space:nowrap;transition:opacity .15s;font-family:inherit;flex-shrink:0;
+}
+.abtn:active{opacity:.75}
+.abtn.pri{background:var(--accent);color:#fff;border-color:var(--accent)}
+.abtn.dng{background:rgba(231,76,60,.12);color:var(--danger);border-color:rgba(231,76,60,.25)}
+.abtn.wrn{background:rgba(240,165,0,.12);color:var(--warning);border-color:rgba(240,165,0,.25)}
+.abtn.suc{background:rgba(46,204,113,.12);color:var(--success);border-color:rgba(46,204,113,.25)}
+
+/* Panel scrollable body */
+#panel-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+
+/* Panel sections */
+.psec{border-bottom:1px solid var(--border)}
+.psec-head{
+  display:flex;align-items:center;padding:10px 14px;
+  font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;
+}
+.psec-head .psec-title{flex:1}
+.psec-head .psec-act{
+  background:none;border:none;color:var(--accent);font-size:12px;font-weight:600;
+  cursor:pointer;font-family:inherit;padding:2px 6px;border-radius:4px;
+  border:1px solid transparent;transition:border-color .15s;
+}
+.psec-head .psec-act:hover{border-color:var(--accent)}
+.psec-body{padding:0 14px 14px}
+
+/* Description content */
+.md h1{font-size:15px;font-weight:600;margin:0 0 8px}
+.md h2{font-size:14px;font-weight:600;margin:10px 0 5px}
+.md h3{font-size:13px;font-weight:600;margin:8px 0 3px;color:var(--muted)}
+.md p{margin-bottom:7px;font-size:14px;line-height:1.6;color:var(--text)}
+.md ul{padding-left:18px;margin-bottom:7px}
+.md li{font-size:14px;line-height:1.6;margin-bottom:2px}
+.md code{background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:13px}
+.md pre{background:var(--surface2);padding:10px;border-radius:6px;overflow-x:auto;font-size:13px;margin-bottom:8px}
+.md em{font-style:italic;color:var(--muted)}
+.md strong{font-weight:600}
+.md a{color:var(--accent);text-decoration:none}
+.md a:hover{text-decoration:underline}
+.md hr{border:none;border-top:1px solid var(--border);margin:10px 0}
+.md-empty{font-size:14px;color:var(--muted);font-style:italic}
+
+/* Subtasks */
+.sub-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
+.sub-item:last-child{border-bottom:none}
+.sub-check{
+  width:20px;height:20px;border-radius:50%;flex-shrink:0;
+  border:2px solid var(--border);background:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.sub-check:hover{border-color:var(--accent)}
+.sub-check.done{background:var(--success);border-color:var(--success)}
+.sub-check.done::after{content:'✓';color:#fff;font-size:11px;font-weight:700}
+.sub-name{font-size:14px;flex:1}
+.sub-name.done{text-decoration:line-through;color:var(--muted)}
+
+/* Worklog */
+.wlog-entry{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.wlog-entry:last-child{border-bottom:none;margin-bottom:0}
+.wlog-ts{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:500}
+.wlog-text{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+
+/* Activity log (collapsible) */
+.log-details{width:100%}
+.log-details summary{
+  padding:10px 14px;font-size:12px;font-weight:600;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.4px;cursor:pointer;
+  list-style:none;display:flex;align-items:center;gap:6px;
+}
+.log-details summary::-webkit-details-marker{display:none}
+.log-details summary::before{content:'›';font-size:16px;transition:transform .15s;display:inline-block}
+.log-details[open] summary::before{transform:rotate(90deg)}
+.log-inner{padding:0 14px 14px}
+.log-entry{display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
+.log-entry:last-child{border-bottom:none}
+.log-ts{color:var(--muted);font-size:11px;white-space:nowrap;min-width:108px;padding-top:1px}
+.log-body{flex:1}
+.log-action{font-weight:500}
+.log-extras{color:var(--muted);font-size:11px;margin-top:1px}
+
+/* Overdue banner */
+.over-banner{
+  background:rgba(231,76,60,.1);color:var(--danger);
+  border:1px solid rgba(231,76,60,.25);border-radius:var(--r);
+  padding:7px 11px;font-size:13px;margin:0 14px 10px;
+}
+
+/* ── Bottom sheet ── */
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:300;opacity:0;pointer-events:none;transition:opacity .2s}
+#overlay.open{opacity:1;pointer-events:all}
+#sheet{
+  position:fixed;bottom:0;left:0;right:0;
+  background:var(--surface);border-radius:16px 16px 0 0;z-index:301;
+  padding-bottom:env(safe-area-inset-bottom);
+  transform:translateY(100%);transition:transform .25s cubic-bezier(.4,0,.2,1);
+  max-height:88vh;display:flex;flex-direction:column;
+}
+#sheet.open{transform:translateY(0)}
+.sheet-handle{width:36px;height:4px;background:var(--border);border-radius:2px;margin:10px auto 0;flex-shrink:0}
+.sheet-title{padding:10px 16px 6px;font-size:16px;font-weight:600;flex-shrink:0}
+.sheet-body{padding:6px 16px 16px;overflow-y:auto;flex:1}
+
+/* Forms */
+.fg{margin-bottom:13px}
+.fg label{display:block;font-size:11px;color:var(--muted);margin-bottom:5px;font-weight:600;text-transform:uppercase;letter-spacing:.3px}
+.fg input,.fg textarea,.fg select{
+  width:100%;background:var(--surface2);border:1px solid var(--border);
+  border-radius:var(--r);padding:9px 11px;color:var(--text);
+  font-size:15px;font-family:inherit;outline:none;transition:border-color .15s;
+  -webkit-appearance:none;appearance:none;
+}
+.fg input:focus,.fg textarea:focus,.fg select:focus{border-color:var(--accent)}
+.fg textarea{min-height:90px;resize:vertical}
+.fg select option{background:var(--surface2)}
+.frow{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.btn-row{display:flex;gap:10px;margin-top:6px}
+.pri-quick{display:flex;gap:8px;margin-bottom:13px}
+.pq-btn{flex:1;padding:9px 6px;border:none;border-radius:var(--r);color:#fff;font-size:13px;font-weight:700;cursor:pointer;opacity:.9;transition:opacity .15s;font-family:inherit}
+.pq-btn:active{opacity:1}
+.pri-quick-sm{display:flex;gap:6px}
+.pq-btn-sm{flex:1;padding:5px 4px;border:none;border-radius:4px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;opacity:.9;transition:opacity .15s;font-family:inherit}
+.pq-btn-sm:active{opacity:1}
+.btn{flex:1;padding:12px;border-radius:var(--r);border:none;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .15s;font-family:inherit}
+.btn:active{opacity:.8}
+.btn-p{background:var(--accent);color:#fff}
+.btn-s{background:var(--surface3);color:var(--text)}
+.btn-d{background:var(--danger);color:#fff}
+
+/* Toast */
+#toast{
+  position:fixed;bottom:calc(var(--nav) + env(safe-area-inset-bottom) + 14px);
+  left:50%;transform:translateX(-50%) translateY(12px);
+  background:var(--surface3);color:var(--text);
+  padding:9px 20px;border-radius:18px;font-size:14px;z-index:500;
+  opacity:0;transition:all .25s;white-space:nowrap;pointer-events:none;
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:3px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>Toledo</h1>
+</div>
+
+<div id="main"></div>
+
+<nav id="bottomnav">
+  <button class="nav-btn active" data-view="tasks" onclick="App.setView('tasks')">
+    <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="2" rx="1"/><rect x="3" y="11" width="18" height="2" rx="1"/><rect x="3" y="17" width="12" height="2" rx="1"/></svg>
+    Tasks
+  </button>
+  <button class="nav-btn" data-view="today" onclick="App.setView('today')">
+    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+    Today
+  </button>
+  <button class="nav-btn" data-view="search" onclick="App.setView('search')">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+    Search
+  </button>
+  <button class="nav-btn" data-view="projects" onclick="App.setView('projects')">
+    <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
+    Projects
+  </button>
+</nav>
+
+<button id="fab" onclick="App.openSheet('new-task')" title="New task">+</button>
+
+<!-- Detail panel -->
+<div id="panel">
+  <div class="panel-head">
+    <button class="panel-back" onclick="App.closePanel()">‹</button>
+    <div class="panel-info" id="panel-info"></div>
+  </div>
+  <div class="panel-actions" id="panel-actions"></div>
+  <div id="panel-body"></div>
+</div>
+
+<!-- Sheet overlay -->
+<div id="overlay" onclick="App.closeSheet()"></div>
+<div id="sheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-title" id="sheet-title"></div>
+  <div class="sheet-body" id="sheet-body"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ── Priority helpers ──────────────────────────────────────────────────────────
+function priLabel(n) {
+  n = parseInt(n);
+  if (n <= 24)  return 'Ultra High';
+  if (n === 25) return 'High';
+  if (n <= 49)  return 'Med-High';
+  if (n === 50) return 'Medium';
+  if (n <= 74)  return 'Med-Low';
+  if (n === 75) return 'Low';
+  return 'Very Low';
+}
+function priColor(n) {
+  n = parseInt(n);
+  if (n <= 24)  return '#c0392b';   // deep red
+  if (n === 25) return '#e74c3c';   // red
+  if (n <= 49)  return '#e67e22';   // orange
+  if (n === 50) return '#f0a500';   // amber
+  if (n <= 74)  return '#2980b9';   // blue
+  if (n === 75) return '#27ae60';   // green
+  return '#555';                    // grey
+}
+
+const App = {
+  view: 'tasks',
+  tasks: [],
+  projects: {},
+  // task list state
+  stateFilter: null,   // null=active+completed, 'active','completed','archive','all'
+  projFilter:  null,
+  // detail panel
+  task: null,
+  // search
+  query: '',
+  results: [],
+  // upcoming
+  upcoming: [],
+  upDays: 7,
+};
+
+// ── API ───────────────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({ error: r.statusText }));
+    throw new Error(e.error || r.statusText);
+  }
+  return r.json();
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+App.toast = function(msg, duration = 2400) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(App._tt);
+  App._tt = setTimeout(() => el.classList.remove('show'), duration);
+};
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+App.init = async function() {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+  await Promise.all([App.loadTasks(), App.loadProjects()]);
+  App.renderMain();
+};
+
+App.loadTasks = async function() {
+  try {
+    let params = [];
+    if (App.stateFilter === 'all') params.push('all=true');
+    else if (App.stateFilter)      params.push('state=' + App.stateFilter);
+    if (App.projFilter)            params.push('project=' + App.projFilter);
+    App.tasks = await api('GET', '/api/tasks' + (params.length ? '?' + params.join('&') : ''));
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.loadProjects = async function() {
+  try { App.projects = await api('GET', '/api/projects'); } catch {}
+};
+
+// ── Views ─────────────────────────────────────────────────────────────────────
+App.setView = function(v) {
+  App.view = v;
+  document.querySelectorAll('.nav-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.view === v)
+  );
+  if (v === 'today')    App.loadUpcoming().then(() => App.renderMain());
+  else if (v === 'projects') App.loadProjects().then(() => App.renderMain());
+  else App.renderMain();
+};
+
+App.renderMain = function() {
+  const el = $('main');
+  switch (App.view) {
+    case 'tasks':    el.innerHTML = App.buildTasksView(); break;
+    case 'today':    el.innerHTML = App.buildTodayView(); break;
+    case 'search':   el.innerHTML = App.buildSearchView(); break;
+    case 'projects': el.innerHTML = App.buildProjectsView(); break;
+  }
+};
+
+// ── Tasks view ────────────────────────────────────────────────────────────────
+App.buildTasksView = function() {
+  // State tabs
+  const stateTabs = [
+    { v: null,        l: 'Active+Completed' },
+    { v: 'active',    l: 'Active' },
+    { v: 'completed', l: 'Completed' },
+    { v: 'archive',   l: 'Archive' },
+    { v: 'all',       l: 'All' },
+  ];
+  let tabs = '<div class="state-tabs">';
+  stateTabs.forEach(o => {
+    tabs += `<button class="state-tab${App.stateFilter === o.v ? ' on' : ''}" onclick='App.setStateFilter(${JSON.stringify(o.v)})'>${o.l}</button>`;
+  });
+  tabs += '</div>';
+
+  // Project filter dropdown
+  const projLabel = App.projFilter ? (App.projects[App.projFilter] || App.projFilter) : 'All Projects';
+  const hasFilter = !!App.projFilter;
+  let projBar = `<div class="proj-bar">
+    <button class="proj-filter-btn${hasFilter ? ' has-filter' : ''}" onclick="App.toggleProjDropdown(event)">
+      <svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+      ${esc(projLabel)}
+      <svg viewBox="0 0 24 24" style="margin-left:2px"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    <div class="proj-dropdown" id="proj-dropdown">
+      <div class="proj-option${!App.projFilter ? ' on' : ''}" onclick="App.setProjFilter(null)">All Projects</div>`;
+  Object.keys(App.projects).sort().forEach(p => {
+    projBar += `<div class="proj-option${App.projFilter === p ? ' on' : ''}" onclick='App.setProjFilter(${JSON.stringify(p)})'>${esc(App.projects[p] || p)}</div>`;
+  });
+  projBar += '</div></div>';
+
+  // Show state tag only in "all" view
+  const showState = App.stateFilter === 'all' || App.stateFilter === null;
+
+  // Task list
+  if (!App.tasks.length) {
+    return tabs + projBar + `<div class="empty"><div class="empty-icon">📋</div><p>No tasks</p></div>`;
+  }
+
+  const order = ['active', 'completed', 'archive'];
+  const groups = {};
+  App.tasks.forEach(t => { (groups[t.state] = groups[t.state] || []).push(t); });
+
+  let html = tabs + projBar;
+  order.forEach(s => {
+    if (!groups[s]) return;
+    // Only show section header when multiple states are visible
+    if (showState) html += `<div class="sec">${s.charAt(0).toUpperCase() + s.slice(1)}</div>`;
+    groups[s].forEach(t => { html += App.buildCard(t, showState); });
+  });
+  return html;
+};
+
+App.setStateFilter = function(v) {
+  App.stateFilter = v;
+  App.loadTasks().then(() => App.renderMain());
+};
+
+App.setProjFilter = function(v) {
+  App.projFilter = v;
+  App.loadTasks().then(() => App.renderMain());
+};
+
+App.toggleProjDropdown = function(e) {
+  e.stopPropagation();
+  const dd = $('proj-dropdown');
+  if (dd) dd.classList.toggle('open');
+};
+
+// Close dropdown on outside click
+document.addEventListener('click', () => {
+  const dd = $('proj-dropdown');
+  if (dd) dd.classList.remove('open');
+});
+
+// ── Task card ─────────────────────────────────────────────────────────────────
+App.buildCard = function(t, showState) {
+  const dueHtml = t.due
+    ? `<span class="due${t.overdue ? ' over' : ''}">${t.overdue ? '⚠ ' : ''}${t.due}</span>`
+    : '';
+  const recHtml  = t.recurrence ? `<span class="rec-tag">↻ ${t.recurrence}d</span>` : '';
+  const stateHtml = showState ? `<span class="state-tag s-${t.state}">${t.state}</span>` : '';
+  const totalSubs = t.subtasks.active.length + t.subtasks.completed.length;
+  const subHtml  = totalSubs > 0
+    ? `<span class="sub-count">${t.subtasks.completed.length}/${totalSubs} subtasks</span>` : '';
+
+  const pl = priLabel(t.priority), pc = priColor(t.priority);
+  return `<div class="card" onclick='App.openTask(${JSON.stringify(t.slug)})'>
+    <div class="card-top">
+      <span class="pri-badge" style="background:${pc}">${pl}</span>
+      <span class="proj-tag">${esc(projName(t.project))}</span>
+      <span class="task-name">${esc(t.name)}</span>
+    </div>
+    <div class="card-meta">${dueHtml}${recHtml}${subHtml}${stateHtml}</div>
+  </div>`;
+};
+
+// ── Today view ────────────────────────────────────────────────────────────────
+App.loadUpcoming = async function() {
+  try { App.upcoming = await api('GET', `/api/upcoming?days=${App.upDays}`); }
+  catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.buildTodayView = function() {
+  const tabs = [
+    { d: 0, l: 'Overdue' }, { d: 1, l: 'Today' },
+    { d: 7, l: '7 days' }, { d: 14, l: '14 days' }, { d: 30, l: '30 days' },
+  ];
+  let html = '<div class="state-tabs">';
+  tabs.forEach(t => {
+    html += `<button class="state-tab${App.upDays === t.d ? ' on' : ''}" onclick="App.setUpDays(${t.d})">${t.l}</button>`;
+  });
+  html += '</div>';
+  if (!App.upcoming.length) {
+    return html + `<div class="empty"><div class="empty-icon">🎉</div><p>Nothing due in this window</p></div>`;
+  }
+  App.upcoming.forEach(t => { html += App.buildCard(t, false); });
+  return html;
+};
+
+App.setUpDays = function(n) {
+  App.upDays = n;
+  App.loadUpcoming().then(() => App.renderMain());
+};
+
+// ── Search view ───────────────────────────────────────────────────────────────
+App.buildSearchView = function() {
+  let html = `<div class="search-wrap">
+    <input id="search-input" type="search" placeholder="Search tasks…"
+      value="${esc(App.query)}" oninput="App.onSearch(this.value)" autocomplete="off">
+  </div>`;
+  if (!App.query) {
+    return html + `<div class="empty"><div class="empty-icon">🔍</div><p>Search names, descriptions, and notes</p></div>`;
+  }
+  if (!App.results.length) {
+    return html + `<div class="empty"><p>No results for "${esc(App.query)}"</p></div>`;
+  }
+  App.results.forEach(t => { html += App.buildCard(t, true); });
+  return html;
+};
+
+App.onSearch = async function(q) {
+  App.query = q;
+  if (!q.trim()) { App.results = []; App.renderMain(); return; }
+  try { App.results = await api('GET', '/api/search?q=' + encodeURIComponent(q)); } catch {}
+  App.renderMain();
+  const inp = $('search-input');
+  if (inp) { inp.focus(); inp.setSelectionRange(q.length, q.length); }
+};
+
+// ── Projects view ─────────────────────────────────────────────────────────────
+App.buildProjectsView = function() {
+  let html = `<div style="padding:12px 14px 4px;display:flex;justify-content:flex-end">
+    <button class="abtn pri" onclick="App.openSheet('new-project')">+ Add project</button>
+  </div>`;
+  const codes = Object.keys(App.projects).sort();
+  if (!codes.length) return html + `<div class="empty"><div class="empty-icon">🗂️</div><p>No projects yet</p></div>`;
+  html += `<div style="background:var(--surface);border-radius:var(--r);margin:8px 10px;border:1px solid var(--border)">`;
+  codes.forEach(code => {
+    html += `<div class="proj-row">
+      <span class="proj-code">${esc(code)}</span>
+      <span class="proj-name">${esc(App.projects[code])}</span>
+      <button class="icon-btn" onclick='App.deleteProject(${JSON.stringify(code)})' title="Remove">✕</button>
+    </div>`;
+  });
+  return html + '</div>';
+};
+
+App.deleteProject = async function(code) {
+  if (!confirm(`Remove project "${code}"?`)) return;
+  try {
+    await api('DELETE', `/api/projects/${code}`);
+    await App.loadProjects();
+    App.renderMain();
+    App.toast(`Removed ${code}`);
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+// ── Task detail panel ─────────────────────────────────────────────────────────
+App.openTask = async function(slug) {
+  try {
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
+    App.renderPanel();
+    $('panel').classList.add('open');
+    $('panel-body').scrollTop = 0;
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.closePanel = function() { $('panel').classList.remove('open'); };
+
+App.renderPanel = function() {
+  const tk = App.task;
+  if (!tk) return;
+
+  // ── Header ──
+  const overdue = tk.overdue;
+  let metaPills = '';
+
+  // Due date pill (tappable)
+  if (tk.due) {
+    metaPills += `<button class="meta-pill${overdue ? ' over' : ''}" onclick="App.openSheet('set-due')" title="Change due date">
+      <span class="lbl">Due</span>
+      <span class="val">${esc(tk.due)}</span>
+      <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+    </button>`;
+  } else {
+    metaPills += `<button class="meta-pill" onclick="App.openSheet('set-due')" title="Set due date">
+      <span class="lbl">Due</span><span class="val" style="color:var(--muted)">not set</span>
+      <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>`;
+  }
+
+  // Priority pill (tappable)
+  const pLabel = priLabel(tk.priority), pColor = priColor(tk.priority);
+  metaPills += `<button class="meta-pill" onclick="App.openSheet('reprioritize')" title="Change priority">
+    <span class="lbl">Priority</span>
+    <span class="val" style="color:${pColor};font-weight:700">${tk.priority} · ${pLabel}</span>
+    <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+  </button>`;
+
+  // Project pill (tappable)
+  metaPills += `<button class="meta-pill" onclick="App.openSheet('change-project')" title="Change project">
+    <span class="lbl">Project</span>
+    <span class="val">${esc(projName(tk.project))}</span>
+    <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+  </button>`;
+
+  // State pill
+  metaPills += `<span class="meta-pill s-${tk.state}" style="cursor:default;background:none;border-color:transparent">
+    <span class="val state-tag s-${tk.state}">${tk.state}</span>
+  </span>`;
+
+  if (tk.recurrence) {
+    metaPills += `<span class="meta-pill" style="cursor:default">
+      <span class="lbl">Recurs</span>
+      <span class="val">every ${tk.recurrence}d</span>
+    </span>`;
+  }
+
+  $('panel-info').innerHTML = `<h2>${esc(tk.name)}</h2><div class="panel-meta">${metaPills}</div>`;
+
+  // ── State-machine action buttons ──
+  let actions = '';
+  if (tk.state === 'active') {
+    actions += `<button class="abtn pri" onclick="App.doAction('done')">✓ Mark Completed</button>`;
+    if (tk.recurrence) {
+      actions += `<button class="abtn wrn" onclick="App.doAction('cancel')">✕ Cancel Recurrence</button>`;
+    }
+  } else if (tk.state === 'completed') {
+    actions += `<button class="abtn" onclick="App.doAction('archive')">Archive</button>`;
+    actions += `<button class="abtn suc" onclick="App.doMove('active')">↩ Make Active</button>`;
+  } else if (tk.state === 'archive') {
+    actions += `<button class="abtn suc" onclick="App.doMove('active')">↩ Make Active</button>`;
+    actions += `<button class="abtn dng" onclick="App.confirmDelete()">🗑 Delete</button>`;
+  }
+  $('panel-actions').innerHTML = actions;
+
+  // ── Scrollable body: sections ──
+  let body = '';
+
+  // Overdue banner
+  if (overdue) {
+    body += `<div class="over-banner">⚠ Overdue since ${tk.due}</div>`;
+  }
+
+  // Description section
+  const descHtml = renderDesc(tk.description);
+  body += `<div class="psec">
+    <div class="psec-head">
+      <span class="psec-title">Description</span>
+      <button class="psec-act" onclick="App.openSheet('edit-desc')">Edit</button>
+    </div>
+    <div class="psec-body"><div class="md">${descHtml}</div></div>
+  </div>`;
+
+  // Subtasks section
+  const allSubs = [
+    ...tk.subtasks.active.map(s => ({ ...s, done: false })),
+    ...tk.subtasks.completed.map(s => ({ ...s, done: true })),
+  ];
+  let subsHtml = allSubs.length === 0
+    ? `<p class="md-empty">No subtasks yet.</p>`
+    : allSubs.map(s => `<div class="sub-item">
+        <button class="sub-check${s.done ? ' done' : ''}"
+          ${!s.done ? `onclick='App.doneSubtask(${JSON.stringify(s.slug)})'` : ''}
+          title="${s.done ? 'Completed' : 'Mark done'}"></button>
+        <span class="sub-name${s.done ? ' done' : ''}">${esc(s.name)}</span>
+      </div>`).join('');
+  body += `<div class="psec">
+    <div class="psec-head">
+      <span class="psec-title">Subtasks</span>
+      <button class="psec-act" onclick="App.openSheet('add-subtask')">+ Add</button>
+    </div>
+    <div class="psec-body">${subsHtml}</div>
+  </div>`;
+
+  // Notes / Worklog section
+  const raw = (tk.worklog || '').trim();
+  let wlogHtml = '';
+  if (!raw) {
+    wlogHtml = `<p class="md-empty">No notes yet.</p>`;
+  } else {
+    const entries = raw.split(/\n(?=### )/).filter(Boolean).reverse();
+    wlogHtml = entries.map(entry => {
+      const m = entry.match(/^### (.+)\n([\s\S]*)$/);
+      return m
+        ? `<div class="wlog-entry"><div class="wlog-ts">${esc(m[1])}</div><div class="wlog-text">${esc(m[2].trim())}</div></div>`
+        : `<div class="wlog-entry"><div class="wlog-text">${esc(entry.trim())}</div></div>`;
+    }).join('');
+  }
+  body += `<div class="psec">
+    <div class="psec-head">
+      <span class="psec-title">Notes</span>
+      <button class="psec-act" onclick="App.openSheet('add-note')">+ Add</button>
+    </div>
+    <div class="psec-body">${wlogHtml}</div>
+  </div>`;
+
+  // Activity log (collapsible)
+  let logHtml = '';
+  if (tk.log && tk.log.length) {
+    logHtml = [...tk.log].reverse().map(e => {
+      const { ts, action, ...rest } = e;
+      const extras = Object.entries(rest).map(([k, v]) => `${k}=${v}`).join('  ');
+      return `<div class="log-entry">
+        <div class="log-ts">${ts.replace('T', ' ').slice(0, 16)}</div>
+        <div class="log-body">
+          <div class="log-action">${esc(action)}</div>
+          ${extras ? `<div class="log-extras">${esc(extras)}</div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+  } else {
+    logHtml = `<p class="md-empty">No activity yet.</p>`;
+  }
+  body += `<div class="psec" style="border-bottom:none">
+    <details class="log-details">
+      <summary>Activity Log</summary>
+      <div class="log-inner">${logHtml}</div>
+    </details>
+  </div>`;
+
+  $('panel-body').innerHTML = body;
+};
+
+App.doAction = async function(action) {
+  if (!App.task) return;
+  try {
+    const d = await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/${action}`);
+    if (action === 'done' && d.recurring) {
+      App.toast(`↻ Next due: ${d.next_due}`);
+      App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+      App.renderPanel();
+    } else {
+      App.toast(action === 'done' ? '✓ Completed' : action === 'archive' ? 'Archived' : 'Done');
+      App.closePanel();
+    }
+    App.loadTasks().then(() => App.renderMain());
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.doMove = async function(state) {
+  if (!App.task) return;
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/move`, { state });
+    App.toast(`→ ${state}`);
+    App.closePanel();
+    App.loadTasks().then(() => App.renderMain());
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.doneSubtask = async function(subSlug) {
+  if (!App.task) return;
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/subdone`, { slug: subSlug });
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.renderPanel();
+    App.toast('✓ Subtask done');
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.confirmDelete = async function() {
+  if (!App.task || !confirm(`Delete "${App.task.name}"? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.slug)}`);
+    App.closePanel();
+    App.toast('Deleted');
+    App.loadTasks().then(() => App.renderMain());
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+// ── Bottom sheet ──────────────────────────────────────────────────────────────
+App.openSheet = function(type) {
+  const configs = {
+    'new-task': {
+      title: 'New task',
+      body: () => `
+        <div class="fg"><label>Name *</label><input id="f-name" type="text" autocomplete="off"></div>
+        <div class="frow">
+          <div class="fg"><label>Priority</label>
+            <div class="pri-quick-sm">
+              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(25)">High</button>
+              <button class="pq-btn-sm" style="background:#f0a500" onclick="App.setPriQuick(50)">Med</button>
+              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(75)">Low</button>
+            </div>
+            <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px">
+          </div>
+          <div class="fg"><label>Project</label>
+            <select id="f-proj">
+              ${Object.keys(App.projects).map(p => `<option value="${esc(p)}">${esc(projName(p))}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="fg"><label>Due date</label><input id="f-due" type="date"></div>
+        <div class="fg"><label>Recurrence (days, 0 = none)</label><input id="f-recur" type="number" value="0" min="0"></div>
+        <div class="fg"><label>Description</label><textarea id="f-desc" placeholder="Markdown supported…"></textarea></div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitNewTask()">Create</button>
+        </div>`,
+    },
+    'add-note': {
+      title: 'Add note',
+      body: () => `
+        <div class="fg"><label>Note</label><textarea id="f-note" placeholder="Write your note…" rows="5"></textarea></div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitNote()">Add</button>
+        </div>`,
+    },
+    'add-subtask': {
+      title: 'Add subtask',
+      body: () => `
+        <div class="fg"><label>Name *</label><input id="f-name" type="text" autocomplete="off"></div>
+        <div class="frow">
+          <div class="fg"><label>Priority</label>
+            <div class="pri-quick-sm">
+              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(25)">High</button>
+              <button class="pq-btn-sm" style="background:#f0a500" onclick="App.setPriQuick(50)">Med</button>
+              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(75)">Low</button>
+            </div>
+            <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px">
+          </div>
+          <div class="fg"><label>Due date</label><input id="f-due" type="date"></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitSubtask()">Add</button>
+        </div>`,
+    },
+    'set-due': {
+      title: 'Set due date',
+      body: () => `
+        <div class="fg"><label>Due date</label><input id="f-due" type="date" value="${App.task?.due || ''}"></div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitDue()">Set</button>
+        </div>`,
+    },
+    'reprioritize': {
+      title: 'Change priority',
+      body: () => `
+        <div class="fg"><label>Current: ${App.task?.priority} · ${priLabel(App.task?.priority ?? 50)}</label></div>
+        <div class="pri-quick">
+          <button class="pq-btn" style="background:#e74c3c" onclick="App.setPriQuick(25)">High · 25</button>
+          <button class="pq-btn" style="background:#f0a500" onclick="App.setPriQuick(50)">Medium · 50</button>
+          <button class="pq-btn" style="background:#27ae60" onclick="App.setPriQuick(75)">Low · 75</button>
+        </div>
+        <div class="fg"><label>Or enter a number (1–99)</label><input id="f-pri" type="number" min="1" max="99" value="${App.task?.priority ?? 50}"></div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitReprioritize()">Save</button>
+        </div>`,
+    },
+    'change-project': {
+      title: 'Change project',
+      body: () => `
+        <div class="fg"><label>Current: ${esc(projName(App.task?.project || ''))}</label></div>
+        <div class="fg"><label>New project</label>
+          <select id="f-proj">
+            ${Object.keys(App.projects).map(p =>
+              `<option value="${esc(p)}"${App.task?.project === p ? ' selected' : ''}>${esc(projName(p))}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitReproject()">Save</button>
+        </div>`,
+    },
+    'edit-desc': {
+      title: 'Edit description',
+      body: () => `
+        <div class="fg"><label>Description (Markdown)</label>
+          <textarea id="f-desc" rows="12">${esc(App.task?.description || '')}</textarea>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitEditDesc()">Save</button>
+        </div>`,
+    },
+    'move-task': {
+      title: 'Move to state',
+      body: () => `
+        <div class="fg"><label>Target state</label>
+          <select id="f-state">
+            ${['active','completed','archive'].map(s =>
+              `<option value="${s}"${App.task?.state === s ? ' selected' : ''}>${s}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitMove()">Move</button>
+        </div>`,
+    },
+    'new-project': {
+      title: 'New project',
+      body: () => `
+        <div class="frow">
+          <div class="fg"><label>Code *</label><input id="f-code" type="text" placeholder="WEB" maxlength="8" style="text-transform:uppercase"></div>
+          <div class="fg"><label>Name *</label><input id="f-pname" type="text" placeholder="Web Frontend"></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitNewProject()">Add</button>
+        </div>`,
+    },
+  };
+
+  const cfg = configs[type];
+  if (!cfg) return;
+  $('sheet-title').textContent = cfg.title;
+  $('sheet-body').innerHTML    = cfg.body();
+  $('overlay').classList.add('open');
+  $('sheet').classList.add('open');
+  setTimeout(() => { const f = $('sheet-body').querySelector('input:not([disabled]),textarea'); if (f) f.focus(); }, 280);
+};
+
+App.closeSheet = function() {
+  $('overlay').classList.remove('open');
+  $('sheet').classList.remove('open');
+};
+
+// ── Sheet submitters ──────────────────────────────────────────────────────────
+App.submitNewTask = async function() {
+  const name = $('f-name')?.value.trim();
+  if (!name) { App.toast('Name is required'); return; }
+  const recur = parseInt($('f-recur')?.value || '0') || null;
+  try {
+    await api('POST', '/api/tasks', {
+      name, recur,
+      priority:    parseInt($('f-pri')?.value || '50'),
+      project:     ($('f-proj')?.value || 'GEN').toUpperCase(),
+      due:         $('f-due')?.value || null,
+      description: $('f-desc')?.value.trim() || null,
+    });
+    App.closeSheet();
+    App.toast('✓ Task created');
+    await App.loadTasks();
+    App.renderMain();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitNote = async function() {
+  const text = $('f-note')?.value.trim();
+  if (!text || !App.task) { App.toast('Note text required'); return; }
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/note`, { text });
+    App.closeSheet();
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.renderPanel();
+    App.toast('✓ Note added');
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitSubtask = async function() {
+  const name = $('f-name')?.value.trim();
+  if (!name || !App.task) { App.toast('Name required'); return; }
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/sub`, {
+      name,
+      priority: parseInt($('f-pri')?.value || '50'),
+      due:      $('f-due')?.value || null,
+    });
+    App.closeSheet();
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.renderPanel();
+    App.toast('✓ Subtask added');
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitDue = async function() {
+  const date = $('f-due')?.value;
+  if (!date || !App.task) { App.toast('Date required'); return; }
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/due`, { date });
+    App.closeSheet();
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.renderPanel();
+    App.toast('✓ Due date set');
+    App.loadTasks();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.setPriQuick = function(val) {
+  const el = $('f-pri');
+  if (el) el.value = val;
+};
+
+App.submitReproject = async function() {
+  const proj = $('f-proj')?.value;
+  if (!proj || !App.task) { App.toast('Project required'); return; }
+  try {
+    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/reproject`, { project: proj });
+    App.closeSheet();
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.slug));
+    App.renderPanel();
+    App.toast(`✓ Project → ${projName(proj)}`);
+    App.loadTasks();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitReprioritize = async function() {
+  const pri = parseInt($('f-pri')?.value);
+  if (!pri || !App.task) { App.toast('Priority required'); return; }
+  try {
+    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/reprioritize`, { priority: pri });
+    App.closeSheet();
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.slug));
+    App.renderPanel();
+    App.toast(`✓ Priority → ${pri}`);
+    App.loadTasks();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitEditDesc = async function() {
+  const text = $('f-desc')?.value;
+  if (text == null || !App.task) return;
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/edit`, { text });
+    App.closeSheet();
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.renderPanel();
+    App.toast('✓ Description updated');
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitMove = async function() {
+  const state = $('f-state')?.value;
+  if (!state || !App.task) return;
+  try {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/move`, { state });
+    App.closeSheet();
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.renderPanel();
+    App.toast(`→ ${state}`);
+    App.loadTasks();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitNewProject = async function() {
+  const code  = $('f-code')?.value.trim().toUpperCase();
+  const pname = $('f-pname')?.value.trim();
+  if (!code || !pname) { App.toast('Code and name required'); return; }
+  try {
+    App.projects = await api('POST', '/api/projects', { code, name: pname });
+    App.closeSheet();
+    App.renderMain();
+    App.toast(`✓ Project ${code} added`);
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+function renderDesc(src) {
+  if (!src || !src.trim()) return '<p class="md-empty">No description.</p>';
+  // Strip leading # Title line to avoid duplicating the panel header
+  const stripped = src.replace(/^#[^\n]*\n+/, '');
+  return stripped.trim() ? mdToHtml(stripped) : '<p class="md-empty">No description.</p>';
+}
+
+function mdToHtml(src) {
+  if (!src) return '';
+  const lines = src.split('\n');
+  let html = '', inUl = false, inPre = false;
+  const flushUl = () => { if (inUl) { html += '</ul>'; inUl = false; } };
+  lines.forEach(line => {
+    if (line.startsWith('```')) {
+      if (inPre) { html += '</pre>'; inPre = false; }
+      else { flushUl(); html += '<pre>'; inPre = true; }
+      return;
+    }
+    if (inPre) { html += esc(line) + '\n'; return; }
+    if (/^### /.test(line)) { flushUl(); html += `<h3>${inline(line.slice(4))}</h3>`; return; }
+    if (/^## /.test(line))  { flushUl(); html += `<h2>${inline(line.slice(3))}</h2>`; return; }
+    if (/^# /.test(line))   { flushUl(); html += `<h1>${inline(line.slice(2))}</h1>`; return; }
+    if (/^---$/.test(line)) { flushUl(); html += '<hr>'; return; }
+    if (/^[-*] /.test(line)) {
+      if (!inUl) { html += '<ul>'; inUl = true; }
+      html += `<li>${inline(line.slice(2))}</li>`;
+      return;
+    }
+    flushUl();
+    if (line.trim() === '') { html += '<br>'; return; }
+    html += `<p>${inline(line)}</p>`;
+  });
+  flushUl();
+  return html;
+}
+
+function inline(s) {
+  return esc(s)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,     '<em>$1</em>')
+    .replace(/_(.+?)_/g,       '<em>$1</em>')
+    .replace(/`(.+?)`/g,       '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function projName(code) {
+  return App.projects[code] || code;
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+App.init();
+</script>
+</body>
+</html>
