@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  toledo-server:
+    build: .
+    container_name: toledo-server
+    ports:
+      - "4321:4321"
+    volumes:
+      - toledo-data:/home/toledo/.toledo
+    restart: always
+    command: python toledo_server.py --host 0.0.0.0 --port 4321
+
+  toledo-mcp:
+    build: .
+    container_name: toledo-mcp
+    ports:
+      - "4322:4322"
+    volumes:
+      - toledo-data:/home/toledo/.toledo
+    restart: always
+    command: python toledo_mcp.py --host 0.0.0.0 --port 4322
+
+volumes:
+  toledo-data:
