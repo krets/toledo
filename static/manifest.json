@@ -1,6 +1,6 @@
 {
-  "name": "Toledo",
-  "short_name": "Toledo",
+  "name": "TOleDO",
+  "short_name": "TOleDO",
   "description": "File-based task manager",
   "start_url": "/",
   "display": "standalone",

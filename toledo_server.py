@@ -340,8 +340,10 @@ def task_sub(slug):
     data, err, code = require_json("name")
     if err:
         return err, code
-    p        = int(data.get("priority") or 50)
-    sub_slug = f"{p:02d}-{re.sub(r'[^a-z0-9]+', '-', data['name'].lower()).strip('-')}"
+    p          = int(data.get("priority") or 50)
+    parent_proj = t.parse_task_slug(folder.name)["project"]
+    name_slug   = re.sub(r'[^a-z0-9]+', '-', data['name'].lower()).strip('-')
+    sub_slug    = f"{p:02d}-{parent_proj}-{name_slug}"
     sf       = folder / "subtasks" / "active" / sub_slug
     t.ensure_dir(sf)
     (sf / "description.md").write_text(
@@ -368,9 +370,104 @@ def task_subdone(slug):
         return jsonify({"error": "Subtask not found"}), 404
     dst = folder / "subtasks" / "completed"
     t.ensure_dir(dst)
-    src.rename(dst / src.name)
+    dst_path = dst / src.name
+    if dst_path.exists():
+        n = 2
+        while True:
+            candidate = dst / f"{src.name}-{n}"
+            if not candidate.exists():
+                dst_path = candidate
+                break
+            n += 1
+    src.rename(dst_path)
     t.append_log(folder, "subtask_completed", subtask=sub_slug)
     return jsonify({"ok": True})
+
+
+@app.route("/api/tasks/<slug>/subundo", methods=["POST"])
+def task_subundo(slug):
+    r = t.find_task(slug)
+    if not r:
+        return jsonify({"error": "Not found"}), 404
+    folder, _ = r
+    data = request.json or {}
+    sub_slug = data.get("slug")
+    if not sub_slug:
+        return jsonify({"error": "slug required"}), 400
+    src = folder / "subtasks" / "completed" / sub_slug
+    if not src.exists():
+        return jsonify({"error": "Subtask not found"}), 404
+    dst = folder / "subtasks" / "active"
+    t.ensure_dir(dst)
+    dst_path = dst / src.name
+    if dst_path.exists():
+        n = 2
+        while True:
+            candidate = dst / f"{src.name}-{n}"
+            if not candidate.exists():
+                dst_path = candidate
+                break
+            n += 1
+    src.rename(dst_path)
+    t.append_log(folder, "subtask_reopened", subtask=sub_slug)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/tasks/<slug>/rename", methods=["POST"])
+def task_rename(slug):
+    r = t.find_task(slug)
+    if not r:
+        return jsonify({"error": "Not found"}), 404
+    folder, state = r
+    data, err, code = require_json("name")
+    if err:
+        return err, code
+    new_name = data["name"].strip()
+    if not new_name:
+        return jsonify({"error": "name required"}), 400
+    old_info     = t.parse_task_slug(folder.name)
+    new_name_slug = re.sub(r'[^a-z0-9]+', '-', new_name.lower()).strip('-')
+    new_slug     = f"{old_info['priority']:02d}-{old_info['project']}-{new_name_slug}"
+    new_folder   = t.get_tasks_dir() / state / new_slug
+    if new_folder.exists():
+        return jsonify({"error": f"Slug '{new_slug}' already exists"}), 409
+    folder.rename(new_folder)
+    if t.get_context() == folder.name:
+        t.set_context(new_slug)
+    t.append_log(new_folder, "renamed", old=old_info["name"], new=new_name)
+    return jsonify(task_to_dict(new_folder, state))
+
+
+@app.route("/api/tasks/<slug>/subrename", methods=["POST"])
+def task_subrename(slug):
+    r = t.find_task(slug)
+    if not r:
+        return jsonify({"error": "Not found"}), 404
+    folder, _ = r
+    data     = request.json or {}
+    sub_slug = data.get("slug", "")
+    new_name = data.get("name", "").strip()
+    if not sub_slug or not new_name:
+        return jsonify({"error": "slug and name required"}), 400
+    src = src_state = None
+    for ss in t.SUBTASK_STATES:
+        c = folder / "subtasks" / ss / sub_slug
+        if c.exists():
+            src, src_state = c, ss
+            break
+    if not src:
+        return jsonify({"error": "Subtask not found"}), 404
+    # Use parent project so slug format is consistent
+    parent_proj  = t.parse_task_slug(folder.name)["project"]
+    old_pri      = int(sub_slug.split("-")[0]) if sub_slug.split("-")[0].isdigit() else 50
+    new_name_slug = re.sub(r'[^a-z0-9]+', '-', new_name.lower()).strip('-')
+    new_sub_slug = f"{old_pri:02d}-{parent_proj}-{new_name_slug}"
+    dst = folder / "subtasks" / src_state / new_sub_slug
+    if dst.exists():
+        return jsonify({"error": "Name conflict"}), 409
+    src.rename(dst)
+    t.append_log(folder, "subtask_renamed", old=sub_slug, new=new_sub_slug)
+    return jsonify({"slug": new_sub_slug})
 
 
 # ── Upcoming & Search ─────────────────────────────────────────────────────────
@@ -435,7 +532,28 @@ def add_project():
     if err:
         return err, code
     projects = t.load_projects()
-    projects[data["code"].upper()] = data["name"]
+    projects[data["code"].upper()] = {
+        "name": data["name"],
+        "color": data.get("color") or "#6b9ce8",
+    }
+    t.save_projects(projects)
+    return jsonify(projects)
+
+
+@app.route("/api/projects/<code>", methods=["PATCH"])
+def update_project(code):
+    data = request.json or {}
+    projects = t.load_projects()
+    code = code.upper()
+    if code not in projects:
+        return jsonify({"error": "Not found"}), 404
+    entry = projects[code]
+    if not isinstance(entry, dict):
+        entry = {"name": str(entry), "color": ""}
+    for key in ("name", "color"):
+        if key in data:
+            entry[key] = data[key]
+    projects[code] = entry
     t.save_projects(projects)
     return jsonify(projects)
 

@@ -57,11 +57,29 @@ def init_tasks_dir():
 
 def load_projects():
     pf = get_tasks_dir() / "projects.json"
-    return json.loads(pf.read_text()) if pf.exists() else {}
+    if not pf.exists():
+        return {}
+    data = json.loads(pf.read_text())
+    # Migrate old string format {"CODE": "name"} to {"CODE": {"name": ..., "color": ...}}
+    migrated = False
+    for code, val in list(data.items()):
+        if isinstance(val, str):
+            data[code] = {"name": val, "color": ""}
+            migrated = True
+    if migrated:
+        save_projects(data)
+    return data
 
 def save_projects(p):
     pf = get_tasks_dir() / "projects.json"
     pf.write_text(json.dumps(p, indent=2))
+
+def proj_display_name(projects, code):
+    """Return the display name for a project code."""
+    val = projects.get(code)
+    if isinstance(val, dict):
+        return val.get("name", code)
+    return str(val) if val else code
 
 def make_task_slug(priority, project_code, name):
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
@@ -156,7 +174,7 @@ def cmd_status(args):
     lines = ["# Toledo Task Status\n",
              f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n"]
     if project_filter:
-        label = projects.get(project_filter, project_filter)
+        label = proj_display_name(projects, project_filter)
         lines.append(f"_Project filter: `{project_filter}` — {label}_\n")
     show = STATES if getattr(args, "all", False) else ["active", "completed"]
 
@@ -321,14 +339,32 @@ def cmd_proj(args):
         print(f"✓ Removed project '{code}'")
         return
     if getattr(args, "list", False) or not (getattr(args, "code", None) and getattr(args, "name", None)):
-        if not projects: print("No projects defined.")
+        if not projects:
+            print("No projects defined.")
         else:
-            for code, name in sorted(projects.items()):
-                print(f"  {code:8s}  {name}")
+            print(f"  {'CODE':<8}  {'NAME':<30}  COLOR")
+            print(f"  {'-'*8}  {'-'*30}  -----")
+            for code, val in sorted(projects.items()):
+                if isinstance(val, dict):
+                    name  = val.get("name", "")
+                    color = val.get("color") or "(none)"
+                else:
+                    name, color = str(val), "(none)"
+                print(f"  {code:<8}  {name:<30}  {color}")
         return
-    projects[args.code.upper()] = args.name
+    code = args.code.upper()
+    color = getattr(args, "color", None)
+    existing = projects.get(code)
+    if isinstance(existing, dict):
+        existing["name"] = args.name
+        if color:
+            existing["color"] = color
+        projects[code] = existing
+    else:
+        projects[code] = {"name": args.name, "color": color or ""}
     save_projects(projects)
-    print(f"✓ Project '{args.code.upper()}' = '{args.name}'")
+    color_str = f"  color={color}" if color else ""
+    print(f"✓ Project '{code}' = '{args.name}'{color_str}")
 
 
 def cmd_show(args):
@@ -487,6 +523,94 @@ def cmd_log(args):
         print(f"  {ts}  {action:<28} {extras}")
 
 
+def serialize_task_folder(task_folder):
+    """Recursively turn a task folder into a dict."""
+    task_data = {
+        "slug": task_folder.name,
+        "files": {},
+        "dirs": {}
+    }
+    for item in task_folder.iterdir():
+        if item.is_file():
+            task_data["files"][item.name] = item.read_text()
+        elif item.is_dir():
+            if item.name == "subtasks":
+                task_data["subtasks"] = {}
+                for sstate in SUBTASK_STATES:
+                    sstate_dir = item / sstate
+                    if sstate_dir.exists():
+                        task_data["subtasks"][sstate] = [
+                            serialize_task_folder(sub) for sub in sstate_dir.iterdir() if sub.is_dir()
+                        ]
+            else:
+                task_data["dirs"][item.name] = {
+                    f.name: f.read_text() for f in item.iterdir() if f.is_file()
+                }
+    return task_data
+
+
+def restore_task_folder(parent_dir, task_data):
+    """Recursively restore a task folder from a dict."""
+    task_folder = parent_dir / task_data["slug"]
+    ensure_dir(task_folder)
+    for fname, content in task_data.get("files", {}).items():
+        (task_folder / fname).write_text(content)
+
+    for dirname, dir_content in task_data.get("dirs", {}).items():
+        dpath = task_folder / dirname
+        ensure_dir(dpath)
+        for fname, fcontent in dir_content.items():
+            (dpath / fname).write_text(fcontent)
+
+    if "subtasks" in task_data:
+        for state, subtasks in task_data["subtasks"].items():
+            for sub_data in subtasks:
+                restore_task_folder(task_folder / "subtasks" / state, sub_data)
+
+
+def cmd_export(args):
+    data = {
+        "version": "1.0",
+        "exported_at": datetime.now().isoformat(),
+        "projects": load_projects(),
+        "context": get_context(),
+        "tasks": {}
+    }
+    tasks_dir = get_tasks_dir()
+    for state in STATES:
+        sd = tasks_dir / state
+        if not sd.exists(): continue
+        data["tasks"][state] = [
+            serialize_task_folder(t) for t in sd.iterdir() if t.is_dir()
+        ]
+    Path(args.file).write_text(json.dumps(data, indent=2))
+    print(f"✓ Exported everything to {args.file}")
+
+
+def cmd_import(args):
+    fpath = Path(args.file)
+    if not fpath.exists():
+        print(f"✗ File '{args.file}' not found."); return
+    data = json.loads(fpath.read_text())
+
+    tasks_dir = get_tasks_dir()
+    init_tasks_dir()
+
+    if "projects" in data:
+        projects = load_projects()
+        projects.update(data["projects"])
+        save_projects(projects)
+
+    for state, tasks in data.get("tasks", {}).items():
+        for task_data in tasks:
+            restore_task_folder(tasks_dir / state, task_data)
+
+    if "context" in data and data["context"]:
+        set_context(data["context"])
+
+    print(f"✓ Imported everything from {args.file}")
+
+
 # ── CLI wiring ────────────────────────────────────────────────────────────────
 
 def main():
@@ -580,6 +704,7 @@ def main():
     pp.add_argument("name", nargs="?", help="Project display name — required when adding")
     pp.add_argument("-l","--list", action="store_true", help="List all projects")
     pp.add_argument("-r","--remove", metavar="CODE", help="Remove a project by code")
+    pp.add_argument("--color", metavar="HEX", help="Project color as hex (e.g. #3498db)")
 
     psh = s.add_parser("show",
         help="Print the description of a task",
@@ -632,6 +757,12 @@ def main():
                     "Uses the current context task unless a task argument is given.")
     pl.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
 
+    pexp = s.add_parser("export", help="Export all data to a JSON file")
+    pexp.add_argument("file", help="Destination JSON file")
+
+    pimp = s.add_parser("import", help="Import data from a JSON file")
+    pimp.add_argument("file", help="Source JSON file")
+
     args = p.parse_args()
 
     dispatch = {
@@ -648,6 +779,7 @@ def main():
         "archive": cmd_archive, "rm": cmd_rm,
         "reprioritize": cmd_reprioritize, "pri": cmd_reprioritize,
         "worklog": cmd_worklog, "log": cmd_log,
+        "export": cmd_export, "import": cmd_import,
     }
 
     if args.command in dispatch:

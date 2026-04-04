@@ -1,4 +1,4 @@
-const CACHE = 'toledo-v1';
+const CACHE = 'toledo-v2';
 const SHELL = ['/', '/static/index.html', '/manifest.json', '/static/icon-192.svg', '/static/icon-512.svg'];
 
 self.addEventListener('install', e => {
