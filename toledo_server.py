@@ -313,7 +313,7 @@ def task_reprioritize(slug):
     old_pri  = old_info["priority"]
     if old_pri == new_pri:
         return jsonify({"error": "Already that priority"}), 400
-    new_slug   = f"{new_pri:02d}-{old_info['project']}-{old_info['name'].replace(' ', '-')}"
+    new_slug   = f"{old_info['priority']:02d}-{old_info['project']}-{old_info['name'].replace(' ', '-')}"
     new_folder = t.get_tasks_dir() / state / new_slug
     if new_folder.exists():
         return jsonify({"error": f"Slug '{new_slug}' already exists"}), 409
@@ -672,11 +672,186 @@ CHATTABLE_TOOLS = [
                 "required": ["task", "date"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_description",
+            "description": "Update the Markdown description of a task",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "text": {"type": "string", "description": "Full new Markdown content"}
+                },
+                "required": ["task", "text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_subtask",
+            "description": "Add a subtask to an existing task",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Parent task name/slug"},
+                    "name": {"type": "string", "description": "Subtask name"},
+                    "priority": {"type": "integer", "default": 50},
+                    "due": {"type": "string", "description": "YYYY-MM-DD"}
+                },
+                "required": ["task", "name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "done_subtask",
+            "description": "Mark a subtask as completed",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Parent task name/slug"},
+                    "subtask": {"type": "string", "description": "Subtask name or slug"}
+                },
+                "required": ["task", "subtask"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_task",
+            "description": "Move a task to a different state (active, completed, archive)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "state": {"type": "string", "enum": ["active", "completed", "archive"]}
+                },
+                "required": ["task", "state"]
+            }
+        }
     }
 ]
 
 def execute_chat_tool(name, args):
-    # ... existing implementation ...
+    """Executes a tool call and returns a string result."""
+    try:
+        if name == "create_task":
+            t.init_tasks_dir()
+            priority = int(args.get("priority") or 50)
+            project = (args.get("project") or "GEN").upper()
+            slug = t.make_task_slug(priority, project, args["name"])
+            folder = t.get_tasks_dir() / "active" / slug
+            if folder.exists(): return f"Error: Task {slug} already exists"
+            t.ensure_dir(folder)
+            (folder / "description.md").write_text(f"# {args['name']}\n\n_Created via Chat._\n")
+            if args.get("due"): (folder / "due.txt").write_text(args["due"])
+            if args.get("recur"): (folder / "recurrence.txt").write_text(str(args["recur"]))
+            t.append_log(folder, "created", state="active", priority=priority, project=project, source="chat")
+            return f"Success: Created task {slug}"
+
+        if name == "done_task":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, state = r
+            rf = folder / "recurrence.txt"
+            if rf.exists():
+                days = int(rf.read_text().strip())
+                new_due = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+                (folder / "due.txt").write_text(new_due)
+                t.append_log(folder, "completed_recurring", next_due=new_due, source="chat")
+                return f"Success: Recurring task {folder.name} advanced to {new_due}"
+            nf = t.get_tasks_dir() / "completed" / folder.name
+            folder.rename(nf)
+            t.append_log(nf, "state_changed", from_state=state, to_state="completed", source="chat")
+            return f"Success: Completed {folder.name}"
+
+        if name == "add_note":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, _ = r
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            with open(folder / "worklog.md", "a") as f:
+                f.write(f"\n### {ts} (Chat)\n\n{args['text']}\n")
+            t.append_log(folder, "note_added", source="chat")
+            return f"Success: Added note to {folder.name}"
+
+        if name == "set_due":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, _ = r
+            (folder / "due.txt").write_text(args["date"])
+            t.append_log(folder, "due_date_set", date=args["date"], source="chat")
+            return f"Success: Set due date for {folder.name} to {args['date']}"
+
+        if name == "update_description":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, _ = r
+            df = folder / "description.md"
+            if df.exists():
+                ad = folder / "description_archive"
+                t.ensure_dir(ad)
+                df.rename(ad / f"description_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
+            df.write_text(args["text"])
+            t.append_log(folder, "description_updated", source="chat")
+            return f"Success: Updated description for {folder.name}"
+
+        if name == "add_subtask":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Parent task {args['task']} not found"
+            folder, _ = r
+            p = int(args.get("priority") or 50)
+            parent_proj = t.parse_task_slug(folder.name)["project"]
+            name_slug = re.sub(r'[^a-z0-9]+', '-', args['name'].lower()).strip('-')
+            sub_slug = f"{p:02d}-{parent_proj}-{name_slug}"
+            sf = folder / "subtasks" / "active" / sub_slug
+            t.ensure_dir(sf)
+            (sf / "description.md").write_text(f"# {args['name']}\n\n_No description._\n")
+            if args.get("due"): (sf / "due.txt").write_text(args["due"])
+            t.append_log(folder, "subtask_created", subtask=sub_slug, source="chat")
+            return f"Success: Added subtask {sub_slug} to {folder.name}"
+
+        if name == "done_subtask":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Parent task {args['task']} not found"
+            folder, _ = r
+            partial = args["subtask"].lower()
+            active_dir = folder / "subtasks" / "active"
+            if not active_dir.exists(): return "Error: No active subtasks"
+            match = None
+            for sub in active_dir.iterdir():
+                if sub.is_dir() and partial in sub.name.lower():
+                    match = sub; break
+            if not match: return f"Error: Subtask {partial} not found"
+            dst_dir = folder / "subtasks" / "completed"
+            t.ensure_dir(dst_dir)
+            dst = dst_dir / match.name
+            if dst.exists():
+                n = 2
+                while (dst_dir / f"{match.name}-{n}").exists(): n += 1
+                dst = dst_dir / f"{match.name}-{n}"
+            match.rename(dst)
+            t.append_log(folder, "subtask_completed", subtask=match.name, source="chat")
+            return f"Success: Subtask {match.name} marked complete"
+
+        if name == "move_task":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, cur = r
+            to_state = args["state"]
+            if to_state not in t.STATES: return f"Error: Invalid state {to_state}"
+            nf = t.get_tasks_dir() / to_state / folder.name
+            folder.rename(nf)
+            t.append_log(nf, "state_changed", from_state=cur, to_state=to_state, source="chat")
+            return f"Success: Moved {folder.name} to {to_state}"
+
+    except Exception as e:
+        return f"Error executing {name}: {e}"
     return f"Unknown tool: {name}"
 
 def estimate_tokens(messages):
@@ -756,7 +931,7 @@ def chat():
             if folder.is_dir():
                 tasks.append(task_to_dict(folder, state))
 
-    system_prompt = f"""You are Toledo AI, a task management assistant.
+    system_prompt = f\"\"\"You are Toledo AI, a task management assistant.
 Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
 PROJECT CONTEXT:
@@ -773,7 +948,7 @@ INSTRUCTIONS:
    - If the user's request implies a project (e.g., "misc", "random"), use your best judgment to map it to an existing project like "GEN".
    - Default to "GEN" if no project is specified or inferred.
 3. Always confirm the details of the action you performed (e.g., "I've created the task 'Fly a kite' in the General (GEN) project").
-"""
+\"\"\"
 
     messages = [{"role": "system", "content": system_prompt}] + user_msgs
 

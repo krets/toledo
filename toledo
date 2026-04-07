@@ -2,24 +2,14 @@
 """
 Toledo - A file-based task manager CLI
 
-Config:  ~/.toledo.json              (tasks_dir key)
+Config:  ~/.toledo/config.json
 Tasks:   ~/.toledo/tasks/            (default)
 Context: ~/.toledo/.context
 
 Usage examples:
     toledo init
     toledo new "Fix login bug" -p 10 -c WEB --due 2026-04-15
-    toledo new "Weekly review" -p 20 -c GEN --recur 7
-    toledo status
-    toledo ctx fix-login
-    toledo sub "Write unit tests" -p 20
-    toledo note "Found the issue in auth.py line 42"
-    toledo done fix-login
-    toledo cancel weekly-review
-    toledo log
-    toledo proj                    (list)
-    toledo proj WEB "Web Frontend"  (add)
-    toledo proj -r WEB              (remove)
+    toledo config remote.url http://your-server:8000
 """
 
 import argparse
@@ -163,53 +153,90 @@ def clear_context():
         CONTEXT_FILE.unlink()
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
+# ── Remote Client ─────────────────────────────────────────────────────────────
 
-def cmd_chat(args):
-    import requests
-    import os
-
+def get_remote_url():
     config = load_config()
-    server_port = 8000 # Default
+    url = config.get("remote", {}).get("url")
+    if url:
+        return url.rstrip("/")
+    return None
 
-    messages = []
+def remote_request(method, path, **kwargs):
+    import requests
+    url = f"{get_remote_url() or 'http://localhost:8000'}{path}"
+    # Use remote.api_key if set for future-proofing
+    config = load_config()
+    api_key = config.get("remote", {}).get("api_key")
+    headers = kwargs.get("headers", {})
+    if api_key:
+        headers["X-API-Key"] = api_key
     
-    if args.message:
-        messages.append({"role": "user", "content": " ".join(args.message)})
-        try:
-            with Spinner():
-                r = requests.post(f"http://localhost:{server_port}/api/chat", json={"messages": messages})
-                r.raise_for_status()
-                res = r.json()
-            print(f"\n{res.get('message')}\n")
-        except Exception as e:
-            print(f"✗ Error: {e} (Is the server running?)")
-        return
+    try:
+        r = requests.request(method, url, headers=headers, **kwargs)
+        if r.status_code >= 400:
+            try:    err = r.json().get("error", r.text)
+            except: err = r.text
+            print(f"✗ Remote Error ({r.status_code}): {err}")
+            return None
+        return r.json()
+    except Exception as e:
+        print(f"✗ Connection Error: {e}")
+        return None
 
-    print(f"Chatting with Toledo (via server). Type 'exit' to quit.\n")
-    while True:
-        try:
-            user_input = input("user> ")
-            if user_input.lower() in ("exit", "quit"): break
-            if not user_input.strip(): continue
-            
-            messages.append({"role": "user", "content": user_input})
-            
-            with Spinner():
-                r = requests.post(f"http://localhost:{server_port}/api/chat", json={"messages": messages})
-                r.raise_for_status()
-                res = r.json()
-            
-            # Update history from server (compacted if needed)
-            messages = res.get("history", messages)
-            
-            print(f"ai> {res.get('message')}\n")
+def cmd_remote_status(args):
+    params = {}
+    if args.project: params["project"] = args.project
+    if args.all: params["all"] = "true"
+    
+    tasks = remote_request("GET", "/api/tasks", params=params)
+    if tasks is None: return
+    
+    print(f"# Toledo Task Status (Remote: {get_remote_url() or 'http://localhost:8000'})\n")
+    
+    states = ["active", "completed"]
+    if args.all: states.append("archive")
+    
+    for state in states:
+        st_tasks = [t for t in tasks if t["state"] == state]
+        if not st_tasks: continue
+        print(f"## {state.capitalize()}\n")
+        for t in st_tasks:
+            due_s = f" · due {t['due']}" if t['due'] else ""
+            if t['overdue']: due_s += " ⚠ OVERDUE"
+            rec_s = f" · every {t['recurrence']}d" if t['recurrence'] else ""
+            print(f"- **[{t['priority']:02d}]** `{t['project']}` {t['name'].title()}{due_s}{rec_s}")
+            for ss in ["active", "completed"]:
+                subs = t.get("subtasks", {}).get(ss, [])
+                for sub in subs:
+                    check = "x" if ss == "completed" else " "
+                    print(f"  - [{check}] {sub['name'].title()}")
+    print()
 
-        except KeyboardInterrupt:
-            print("\nInterrupted."); break
-        except Exception as e:
-            print(f"\n✗ Error: {e} (Is the server running?)")
+def cmd_remote_new(args):
+    data = {
+        "name": args.name,
+        "priority": args.priority,
+        "project": args.project,
+        "description": args.description,
+        "due": args.due,
+        "recur": args.recur
+    }
+    res = remote_request("POST", "/api/tasks", json=data)
+    if res: print(f"✓ Created '{res['slug']}' on remote")
 
+def cmd_remote_action(action_path, task_name, success_msg):
+    tasks = remote_request("GET", "/api/tasks?all=true")
+    if not tasks: return
+    matches = [t["slug"] for t in tasks if task_name.lower() in t["slug"].lower()]
+    if not matches: print(f"✗ Task '{task_name}' not found on remote."); return
+    if len(matches) > 1: print(f"✗ Ambiguous matches: {', '.join(matches)}"); return
+    
+    res = remote_request("POST", f"/api/tasks/{matches[0]}/{action_path}")
+    if res: print(f"✓ {success_msg}: {matches[0]}")
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 def cmd_init(args):
     init_tasks_dir()
@@ -594,6 +621,22 @@ def cmd_worklog(args):
     print(wf.read_text())
 
 
+def cmd_log(args):
+    ctx = getattr(args, "task", None) or get_context()
+    if not ctx: print("✗ No task/context."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Task '{ctx}' not found."); return
+    task_folder, _ = r
+    lf = task_folder / "activity.log"
+    if not lf.exists(): print("No activity log."); return
+    print(f"Log for '{task_folder.name}':\n")
+    for line in lf.read_text().splitlines():
+        e = json.loads(line)
+        ts, action = e.pop("ts"), e.pop("action")
+        extras = "  ".join(f"{k}={v}" for k, v in e.items())
+        print(f"  {ts}  {action:<28} {extras}")
+
+
 def cmd_config(args):
     config = load_config()
     if not args.key:
@@ -645,22 +688,6 @@ def cmd_config(args):
     val[parts[-1]] = new_val
     save_config(config)
     print(f"✓ {args.key} = {new_val}")
-
-
-def cmd_log(args):
-    ctx = getattr(args, "task", None) or get_context()
-    if not ctx: print("✗ No task/context."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Task '{ctx}' not found."); return
-    task_folder, _ = r
-    lf = task_folder / "activity.log"
-    if not lf.exists(): print("No activity log."); return
-    print(f"Log for '{task_folder.name}':\n")
-    for line in lf.read_text().splitlines():
-        e = json.loads(line)
-        ts, action = e.pop("ts"), e.pop("action")
-        extras = "  ".join(f"{k}={v}" for k, v in e.items())
-        print(f"  {ts}  {action:<28} {extras}")
 
 
 def serialize_task_folder(task_folder):
@@ -751,167 +778,171 @@ def cmd_import(args):
     print(f"✓ Imported everything from {args.file}")
 
 
+def cmd_chat(args):
+    import requests
+    import os
+
+    config = load_config()
+    server_url = get_remote_url() or "http://localhost:8000"
+
+    messages = []
+    
+    if args.message:
+        messages.append({"role": "user", "content": " ".join(args.message)})
+        try:
+            with Spinner():
+                r = requests.post(f"{server_url}/api/chat", json={"messages": messages})
+                r.raise_for_status()
+                res = r.json()
+            print(f"\n{res.get('message')}\n")
+        except Exception as e:
+            print(f"✗ Error: {e} (Is the server running?)")
+        return
+
+    print(f"Chatting with Toledo ({server_url}). Type 'exit' to quit.\n")
+    while True:
+        try:
+            user_input = input("user> ")
+            if user_input.lower() in ("exit", "quit"): break
+            if not user_input.strip(): continue
+            
+            messages.append({"role": "user", "content": user_input})
+            
+            with Spinner():
+                r = requests.post(f"{server_url}/api/chat", json={"messages": messages})
+                r.raise_for_status()
+                res = r.json()
+            
+            # Update history from server (compacted if needed)
+            messages = res.get("history", messages)
+            
+            print(f"ai> {res.get('message')}\n")
+
+        except KeyboardInterrupt:
+            print("\nInterrupted."); break
+        except Exception as e:
+            print(f"\n✗ Error: {e} (Is the server running?)")
+
+
 # ── CLI wiring ────────────────────────────────────────────────────────────────
 
 def main():
     p = argparse.ArgumentParser(prog="toledo", description="Toledo task manager")
     s = p.add_subparsers(dest="command")
 
-    s.add_parser("init",
-        help="Initialize Toledo (create task dirs and config)",
-        description="Create the tasks directory structure and ~/.toledo.json config file.")
+    s.add_parser("init", help="Initialize Toledo")
 
-    pn = s.add_parser("new",
-        help="Create a new task",
-        description="Create a new task. Tasks are stored as folders under active/ or recurring/.")
+    pn = s.add_parser("new", help="Create a new task")
     pn.add_argument("name", help="Task title")
-    pn.add_argument("-p","--priority", type=int, default=50,
-        help="Priority (lower = higher priority, default 50)")
-    pn.add_argument("-c","--project", default="GEN",
-        help="Project code (default GEN)")
-    pn.add_argument("-d","--description",
-        help="Task description (Markdown). Defaults to a stub.")
-    pn.add_argument("--due", metavar="YYYY-MM-DD",
-        help="Due date")
-    pn.add_argument("--recur", type=int, metavar="DAYS",
-        help="Make this a recurring task; specify interval in days")
+    pn.add_argument("-p","--priority", type=int, default=50)
+    pn.add_argument("-c","--project", default="GEN")
+    pn.add_argument("-d","--description")
+    pn.add_argument("--due", metavar="YYYY-MM-DD")
+    pn.add_argument("--recur", type=int, metavar="DAYS")
 
-    ps = s.add_parser("status", aliases=["ls"],
-        help="Show all active, recurring, and completed tasks",
-        description="Print a Markdown summary of tasks sorted by priority and due date.")
-    ps.add_argument("-a","--all", action="store_true",
-        help="Include archived tasks as well")
-    ps.add_argument("-c","--project", metavar="CODE",
-        help="Filter tasks by project code")
+    ps = s.add_parser("status", aliases=["ls"], help="Show tasks")
+    ps.add_argument("-a","--all", action="store_true")
+    ps.add_argument("-c","--project", metavar="CODE")
 
-    pm = s.add_parser("move", aliases=["mv"],
-        help="Move a task to a different state",
-        description="Manually move a task folder to a different state directory.")
-    pm.add_argument("task", help="Partial task name or slug to match")
-    pm.add_argument("to", choices=STATES, help="Target state")
+    pm = s.add_parser("move", aliases=["mv"], help="Move task")
+    pm.add_argument("task")
+    pm.add_argument("to", choices=STATES)
 
-    pd = s.add_parser("done",
-        help="Mark a task as completed",
-        description="Move a task to completed/. For recurring tasks, advances the due date instead.")
-    pd.add_argument("task", help="Partial task name or slug to match")
+    pd = s.add_parser("done", help="Complete task")
+    pd.add_argument("task")
 
-    pc = s.add_parser("cancel",
-        help="Cancel a recurring task",
-        description="Move a recurring task to completed/ without scheduling its next occurrence.")
-    pc.add_argument("task", help="Partial task name or slug to match")
+    pc = s.add_parser("cancel", help="Cancel recurring")
+    pc.add_argument("task")
 
-    px = s.add_parser("ctx",
-        help="Get or set the active task context",
-        description="Set a task as the current context so sub/note/log commands know which task to act on. "
-                    "Use 'ctx clear' to unset, or 'ctx' / 'ctx show' to print the current context.")
-    px.add_argument("task", nargs="?", default="show",
-        help="Partial task name, 'show' (default), or 'clear'")
+    px = s.add_parser("ctx", help="Context")
+    px.add_argument("task", nargs="?", default="show")
 
-    psub = s.add_parser("sub",
-        help="Add a subtask to the current context task",
-        description="Create a subtask under the active context task. Use 'ctx' to set the context first.")
-    psub.add_argument("name", help="Subtask title")
-    psub.add_argument("-p","--priority", type=int, default=50,
-        help="Subtask priority (default 50)")
-    psub.add_argument("-d","--description", help="Subtask description (Markdown)")
-    psub.add_argument("--due", metavar="YYYY-MM-DD", help="Subtask due date")
+    psub = s.add_parser("sub", help="Add subtask")
+    psub.add_argument("name")
+    psub.add_argument("-p","--priority", type=int, default=50)
+    psub.add_argument("-d","--description")
+    psub.add_argument("--due", metavar="YYYY-MM-DD")
 
-    pnt = s.add_parser("note",
-        help="Append a timestamped note to the current context task",
-        description="Append a note with a timestamp to the task's worklog.md. Use 'ctx' to set context first.")
-    pnt.add_argument("text", help="Note text")
+    pnt = s.add_parser("note", help="Add note")
+    pnt.add_argument("text")
 
-    pe = s.add_parser("edit",
-        help="Replace the description of a task",
-        description="Overwrite a task's description.md (the old version is archived). "
-                    "Uses the current context task unless -t is given.")
-    pe.add_argument("text", help="New description content (Markdown)")
-    pe.add_argument("-t","--task", help="Partial task name or slug (overrides context)")
+    pe = s.add_parser("edit", help="Edit desc")
+    pe.add_argument("text")
+    pe.add_argument("-t","--task")
 
-    pdu = s.add_parser("due",
-        help="Set or update the due date of a task",
-        description="Write a due date to the task's due.txt. "
-                    "Uses the current context task unless -t is given.")
-    pdu.add_argument("date", metavar="YYYY-MM-DD", help="Due date")
-    pdu.add_argument("-t","--task", help="Partial task name or slug (overrides context)")
+    pdu = s.add_parser("due", help="Set due")
+    pdu.add_argument("date", metavar="YYYY-MM-DD")
+    pdu.add_argument("-t","--task")
 
-    pp = s.add_parser("proj",
-        help="Manage project codes",
-        description="List, add, or remove named project codes stored in projects.json. "
-                    "Project codes label tasks (e.g. WEB, OPS). "
-                    "With no arguments, lists all projects.")
-    pp.add_argument("code", nargs="?", help="Project code (e.g. WEB)")
-    pp.add_argument("name", nargs="?", help="Project display name — required when adding")
-    pp.add_argument("-l","--list", action="store_true", help="List all projects")
-    pp.add_argument("-r","--remove", metavar="CODE", help="Remove a project by code")
-    pp.add_argument("--color", metavar="HEX", help="Project color as hex (e.g. #3498db)")
+    pp = s.add_parser("proj", help="Manage projects")
+    pp.add_argument("code", nargs="?")
+    pp.add_argument("name", nargs="?")
+    pp.add_argument("-l","--list", action="store_true")
+    pp.add_argument("-r","--remove", metavar="CODE")
+    pp.add_argument("--color", metavar="HEX")
 
-    psh = s.add_parser("show",
-        help="Print the description of a task",
-        description="Print description.md for a task. "
-                    "Uses the current context task unless -t is given.")
-    psh.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
+    psh = s.add_parser("show", help="Show desc")
+    psh.add_argument("task", nargs="?")
 
-    psr = s.add_parser("search",
-        help="Search tasks by keyword",
-        description="Search task names, descriptions, and worklogs for a keyword.")
-    psr.add_argument("query", help="Search term")
+    psr = s.add_parser("search", help="Search tasks")
+    psr.add_argument("query")
 
-    psd = s.add_parser("subdone",
-        help="Mark a subtask as completed",
-        description="Move a subtask from subtasks/active to subtasks/completed. "
-                    "Requires a context task to be set.")
-    psd.add_argument("name", help="Partial subtask name to match")
+    psd = s.add_parser("subdone", help="Complete subtask")
+    psd.add_argument("name")
 
-    pup = s.add_parser("upcoming", aliases=["today"],
-        help="Show tasks due soon",
-        description="List active and recurring tasks due within N days (default 7).")
-    pup.add_argument("--days", type=int, default=7, metavar="N",
-        help="Look-ahead window in days (default 7)")
+    pup = s.add_parser("upcoming", aliases=["today"], help="Upcoming tasks")
+    pup.add_argument("--days", type=int, default=7)
 
-    par = s.add_parser("archive",
-        help="Archive a task",
-        description="Move a task to the archive state (shortcut for 'move <task> archive').")
-    par.add_argument("task", help="Partial task name or slug to match")
+    par = s.add_parser("archive", help="Archive task")
+    par.add_argument("task")
 
-    prm = s.add_parser("rm",
-        help="Permanently delete a task",
-        description="Delete a task folder and all its contents. Prompts for confirmation.")
-    prm.add_argument("task", help="Partial task name or slug to match")
+    prm = s.add_parser("rm", help="Delete task")
+    prm.add_argument("task")
 
-    pre = s.add_parser("reprioritize", aliases=["pri"],
-        help="Change the priority of a task",
-        description="Rename the task folder to reflect the new priority and log the change.")
-    pre.add_argument("task", help="Partial task name or slug to match")
-    pre.add_argument("priority", type=int, metavar="PRIORITY", help="New priority value (e.g. 10)")
+    pre = s.add_parser("reprioritize", aliases=["pri"], help="Change priority")
+    pre.add_argument("task")
+    pre.add_argument("priority", type=int)
 
-    pw = s.add_parser("worklog",
-        help="Show the worklog (notes) for a task",
-        description="Print the worklog.md for a task — all notes added via 'note'. "
-                    "Uses the current context task unless a task argument is given.")
-    pw.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
+    pw = s.add_parser("worklog", help="Show worklog")
+    pw.add_argument("task", nargs="?")
 
-    pl = s.add_parser("log",
-        help="Show the activity log for a task",
-        description="Print timestamped activity log entries for a task. "
-                    "Uses the current context task unless a task argument is given.")
-    pl.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
+    pl = s.add_parser("log", help="Show log")
+    pl.add_argument("task", nargs="?")
 
-    pch = s.add_parser("chat", help="Chat with your tasks")
-    pch.add_argument("message", nargs="*", help="Optional initial message")
+    pch = s.add_parser("chat", help="Chat with tasks")
+    pch.add_argument("message", nargs="*")
 
-    pcfg = s.add_parser("config", help="Get or set configuration values")
-    pcfg.add_argument("key", nargs="?", help="Key (e.g. llm.model)")
-    pcfg.add_argument("value", nargs="?", help="Value to set")
-    pcfg.add_argument("--unset", action="store_true", help="Unset a key")
+    pcfg = s.add_parser("config", help="Config")
+    pcfg.add_argument("key", nargs="?")
+    pcfg.add_argument("value", nargs="?")
+    pcfg.add_argument("--unset", action="store_true")
 
-    pexp = s.add_parser("export", help="Export all data to a JSON file")
-    pexp.add_argument("file", help="Destination JSON file")
+    pexp = s.add_parser("export", help="Export JSON")
+    pexp.add_argument("file")
 
-    pimp = s.add_parser("import", help="Import data from a JSON file")
-    pimp.add_argument("file", help="Source JSON file")
+    pimp = s.add_parser("import", help="Import JSON")
+    pimp.add_argument("file")
 
     args = p.parse_args()
+    remote_url = get_remote_url()
+
+    if remote_url and args.command not in ["config", "export", "import", "init"]:
+        if args.command in ["status", "ls"]:
+            cmd_remote_status(args); return
+        if args.command == "new":
+            cmd_remote_new(args); return
+        if args.command == "done":
+            cmd_remote_action("done", args.task, "Completed"); return
+        if args.command == "cancel":
+            cmd_remote_action("cancel", args.task, "Cancelled"); return
+        if args.command == "archive":
+            cmd_remote_action("archive", args.task, "Archived"); return
+        if args.command == "chat":
+            cmd_chat(args); return
+        
+        print(f"⚠ Remote mode enabled: {remote_url}")
+        print(f"⚠ Command '{args.command}' not yet mapped for remote use.")
+        return
 
     dispatch = {
         "init": cmd_init, "new": cmd_new,
@@ -927,8 +958,7 @@ def main():
         "archive": cmd_archive, "rm": cmd_rm,
         "reprioritize": cmd_reprioritize, "pri": cmd_reprioritize,
         "worklog": cmd_worklog, "log": cmd_log,
-        "chat": cmd_chat,
-        "config": cmd_config,
+        "chat": cmd_chat, "config": cmd_config,
         "export": cmd_export, "import": cmd_import,
     }
 
