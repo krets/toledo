@@ -28,7 +28,8 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-CONFIG_PATH = Path.home() / ".toledo.json"
+CONFIG_PATH_OLD = Path.home() / ".toledo.json"
+CONFIG_PATH = Path.home() / ".toledo" / "config.json"
 DEFAULT_TASKS_DIR = Path.home() / ".toledo" / "tasks"
 CONTEXT_FILE = Path.home() / ".toledo" / ".context"
 
@@ -39,6 +40,12 @@ SUBTASK_STATES = ["active", "completed"]
 # ── Config & helpers ──────────────────────────────────────────────────────────
 
 def load_config():
+    # Migration: Move old config to new location if it exists
+    if CONFIG_PATH_OLD.exists() and not CONFIG_PATH.exists():
+        ensure_dir(CONFIG_PATH.parent)
+        CONFIG_PATH_OLD.rename(CONFIG_PATH)
+        print(f"ℹ Migrated config to {CONFIG_PATH}")
+
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f:
             return json.load(f)
