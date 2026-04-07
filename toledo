@@ -44,6 +44,9 @@ def load_config():
             return json.load(f)
     return {"tasks_dir": str(DEFAULT_TASKS_DIR)}
 
+def save_config(config):
+    CONFIG_PATH.write_text(json.dumps(config, indent=2))
+
 def get_tasks_dir():
     return Path(load_config().get("tasks_dir", DEFAULT_TASKS_DIR))
 
@@ -69,6 +72,37 @@ def load_projects():
     if migrated:
         save_projects(data)
     return data
+
+class Spinner:
+    def __init__(self, message="Thinking..."):
+        self.message = message
+        self.stop_running = False
+        self.thread = None
+
+    def _spin(self):
+        import time
+        import sys
+        chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        i = 0
+        while not self.stop_running:
+            sys.stdout.write(f"\r {chars[i]} {self.message}")
+            sys.stdout.flush()
+            i = (i + 1) % len(chars)
+            time.sleep(0.1)
+        sys.stdout.write("\r" + " " * (len(self.message) + 10) + "\r")
+        sys.stdout.flush()
+
+    def __enter__(self):
+        import threading
+        self.stop_running = False
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_running = True
+        if self.thread:
+            self.thread.join()
 
 def save_projects(p):
     pf = get_tasks_dir() / "projects.json"
@@ -123,6 +157,110 @@ def clear_context():
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
+
+def cmd_chat(args):
+    import requests
+    import os
+
+    config = load_config()
+    server_port = 8000 # Default
+    # Try to find port from docker-compose or similar if possible, 
+    # but for simplicity we assume the server is reachable at localhost:8000 
+    # or the user is running it locally.
+    
+    # Actually, we can just use the server logic directly if we want, 
+    # but it's better to keep it decoupled. 
+    # For a CLI 'chat', we'll just hit the server endpoint if it's up, 
+    # or implement a standalone version.
+    # Let's implement it standalone using the same logic as the server 
+    # so it works even without the server running.
+
+    try:
+        from litellm import completion
+    except ImportError:
+        print("✗ litellm not installed. Run 'pip install litellm'")
+        return
+
+    llm_config = config.get("llm", {})
+    model = llm_config.get("model", "gpt-4o-mini")
+    api_key = llm_config.get("api_key")
+    base_url = llm_config.get("api_base") # litellm uses api_base
+
+    if api_key:
+        if "gpt" in model or "openai" in model:
+            os.environ["OPENAI_API_KEY"] = api_key
+        elif "claude" in model or "anthropic" in model:
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+        else:
+            os.environ["LITELLM_API_KEY"] = api_key
+
+    projects = load_projects()
+    tasks = []
+    for state in STATES:
+        sd = get_tasks_dir() / state
+        if not sd.exists(): continue
+        for folder in sd.iterdir():
+            if folder.is_dir():
+                # Minimal task info for CLI chat context to keep it fast
+                info = parse_task_slug(folder.name)
+                df = folder / "due.txt"
+                tasks.append({
+                    "slug": folder.name,
+                    "state": state,
+                    "name": info["name"],
+                    "project": info["project"],
+                    "due": df.read_text().strip() if df.exists() else None
+                })
+
+    system_prompt = f"""You are Toledo AI.
+Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+Context:
+- Projects: {json.dumps(projects)}
+- Tasks: {json.dumps(tasks)}
+
+Help the user manage their tasks.
+"""
+    messages = [{"role": "system", "content": system_prompt}]
+
+    if args.message:
+        messages.append({"role": "user", "content": " ".join(args.message)})
+        try:
+            with Spinner():
+                response = completion(model=model, messages=messages, api_base=base_url)
+            print(f"\n{response.choices[0].message.content}\n")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+        return
+
+    print(f"Chatting with Toledo ({model}). Type 'exit' to quit.\n")
+    while True:
+        try:
+            user_input = input("user> ")
+            if user_input.lower() in ("exit", "quit"): break
+            if not user_input.strip(): continue
+            
+            messages.append({"role": "user", "content": user_input})
+            
+            # Use streaming for better UX in CLI
+            # But show a spinner for the initial wait
+            with Spinner():
+                response = completion(model=model, messages=messages, api_base=base_url, stream=True)
+            
+            print("ai> ", end="", flush=True)
+            full_reply = ""
+            for chunk in response:
+                content = chunk.choices[0].delta.content
+                if content:
+                    print(content, end="", flush=True)
+                    full_reply += content
+            print("\n")
+            messages.append({"role": "assistant", "content": full_reply})
+            
+        except KeyboardInterrupt:
+            print("\nInterrupted."); break
+        except Exception as e:
+            print(f"\n✗ Error: {e}")
+
 
 def cmd_init(args):
     init_tasks_dir()
@@ -507,6 +645,59 @@ def cmd_worklog(args):
     print(wf.read_text())
 
 
+def cmd_config(args):
+    config = load_config()
+    if not args.key:
+        print(json.dumps(config, indent=2))
+        return
+
+    parts = args.key.split(".")
+    
+    if args.value is None and not args.unset:
+        # Get
+        val = config
+        for p in parts:
+            if isinstance(val, dict) and p in val:
+                val = val[p]
+            else:
+                val = None; break
+        if val is not None:
+            print(val if not isinstance(val, (dict, list)) else json.dumps(val))
+        return
+
+    if args.unset:
+        # Unset
+        val = config
+        for p in parts[:-1]:
+            if p in val and isinstance(val[p], dict):
+                val = val[p]
+            else:
+                return
+        if parts[-1] in val:
+            del val[parts[-1]]
+            save_config(config)
+            print(f"✓ Unset {args.key}")
+        return
+
+    # Set
+    val = config
+    for p in parts[:-1]:
+        if p not in val or not isinstance(val[p], dict):
+            val[p] = {}
+        val = val[p]
+    
+    new_val = args.value
+    # Try to parse as JSON for bools/ints/etc, fallback to string
+    try:
+        new_val = json.loads(args.value)
+    except:
+        pass
+        
+    val[parts[-1]] = new_val
+    save_config(config)
+    print(f"✓ {args.key} = {new_val}")
+
+
 def cmd_log(args):
     ctx = getattr(args, "task", None) or get_context()
     if not ctx: print("✗ No task/context."); return
@@ -757,6 +948,14 @@ def main():
                     "Uses the current context task unless a task argument is given.")
     pl.add_argument("task", nargs="?", help="Partial task name or slug (overrides context)")
 
+    pch = s.add_parser("chat", help="Chat with your tasks")
+    pch.add_argument("message", nargs="*", help="Optional initial message")
+
+    pcfg = s.add_parser("config", help="Get or set configuration values")
+    pcfg.add_argument("key", nargs="?", help="Key (e.g. llm.model)")
+    pcfg.add_argument("value", nargs="?", help="Value to set")
+    pcfg.add_argument("--unset", action="store_true", help="Unset a key")
+
     pexp = s.add_parser("export", help="Export all data to a JSON file")
     pexp.add_argument("file", help="Destination JSON file")
 
@@ -779,6 +978,8 @@ def main():
         "archive": cmd_archive, "rm": cmd_rm,
         "reprioritize": cmd_reprioritize, "pri": cmd_reprioritize,
         "worklog": cmd_worklog, "log": cmd_log,
+        "chat": cmd_chat,
+        "config": cmd_config,
         "export": cmd_export, "import": cmd_import,
     }
 

@@ -596,6 +596,222 @@ def clear_ctx():
     return jsonify({"context": None})
 
 
+# ── Chat / LLM ────────────────────────────────────────────────────────────────
+
+CHATTABLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "create_task",
+            "description": "Create a new task",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "project": {"type": "string", "description": "Project code, default GEN"},
+                    "priority": {"type": "integer", "description": "1-99, default 50"},
+                    "due": {"type": "string", "description": "YYYY-MM-DD"},
+                    "recur": {"type": "integer", "description": "Days for recurrence"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "done_task",
+            "description": "Mark a task as completed (or advance if recurring)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Partial name or slug"}
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_note",
+            "description": "Add a note to a task's worklog",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "text": {"type": "string"}
+                },
+                "required": ["task", "text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_due",
+            "description": "Set or update a task's due date",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"}
+                },
+                "required": ["task", "date"]
+            }
+        }
+    }
+]
+
+def execute_chat_tool(name, args):
+    """Executes a tool call and returns a string result."""
+    try:
+        if name == "create_task":
+            t.init_tasks_dir()
+            priority = int(args.get("priority") or 50)
+            project = (args.get("project") or "GEN").upper()
+            slug = t.make_task_slug(priority, project, args["name"])
+            folder = t.get_tasks_dir() / "active" / slug
+            if folder.exists(): return f"Error: Task {slug} already exists"
+            t.ensure_dir(folder)
+            (folder / "description.md").write_text(f"# {args['name']}\n\n_Created via Chat._\n")
+            if args.get("due"): (folder / "due.txt").write_text(args["due"])
+            if args.get("recur"): (folder / "recurrence.txt").write_text(str(args["recur"]))
+            t.append_log(folder, "created", state="active", priority=priority, project=project, source="chat")
+            return f"Success: Created task {slug}"
+
+        if name == "done_task":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, state = r
+            rf = folder / "recurrence.txt"
+            if rf.exists():
+                days = int(rf.read_text().strip())
+                new_due = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+                (folder / "due.txt").write_text(new_due)
+                t.append_log(folder, "completed_recurring", next_due=new_due, source="chat")
+                return f"Success: Recurring task {folder.name} advanced to {new_due}"
+            nf = t.get_tasks_dir() / "completed" / folder.name
+            folder.rename(nf)
+            t.append_log(nf, "state_changed", from_state=state, to_state="completed", source="chat")
+            return f"Success: Completed {folder.name}"
+
+        if name == "add_note":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, _ = r
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            with open(folder / "worklog.md", "a") as f:
+                f.write(f"\n### {ts} (Chat)\n\n{args['text']}\n")
+            t.append_log(folder, "note_added", source="chat")
+            return f"Success: Added note to {folder.name}"
+
+        if name == "set_due":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Task {args['task']} not found"
+            folder, _ = r
+            (folder / "due.txt").write_text(args["date"])
+            t.append_log(folder, "due_date_set", date=args["date"], source="chat")
+            return f"Success: Set due date for {folder.name} to {args['date']}"
+
+    except Exception as e:
+        return f"Error executing {name}: {e}"
+    return f"Unknown tool: {name}"
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    from litellm import completion
+    import os
+
+    data, err, code = require_json("messages")
+    if err:
+        return err, code
+
+    config = t.load_config()
+    llm_config = config.get("llm", {})
+    model = llm_config.get("model", "gpt-4o-mini")
+    api_key = llm_config.get("api_key")
+    base_url = llm_config.get("base_url")
+
+    if api_key:
+        if "gpt" in model or "openai" in model: os.environ["OPENAI_API_KEY"] = api_key
+        elif "claude" in model or "anthropic" in model: os.environ["ANTHROPIC_API_KEY"] = api_key
+        else: os.environ["LITELLM_API_KEY"] = api_key
+
+    # Build context
+    projects = t.load_projects()
+    tasks = []
+    for state in t.STATES:
+        sd = t.get_tasks_dir() / state
+        if not sd.exists(): continue
+        for folder in sd.iterdir():
+            if folder.is_dir():
+                tasks.append(task_to_dict(folder, state))
+
+    system_prompt = f"""You are Toledo AI, a task management assistant.
+Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+PROJECT CONTEXT:
+The following project codes and their display names are available:
+{json.dumps(projects, indent=2)}
+
+TASK CONTEXT (current state):
+{json.dumps(tasks, indent=2)}
+
+INSTRUCTIONS:
+1. Help the user manage their tasks using the provided tools.
+2. When creating a task, use the PROJECT CONTEXT to find the most appropriate project code.
+   - If the user mentions a project by name (e.g., "General", "Work"), map it to the corresponding code (e.g., "GEN", "JOB").
+   - If the user's request implies a project (e.g., "misc", "random"), use your best judgment to map it to an existing project like "GEN".
+   - Default to "GEN" if no project is specified or inferred.
+3. Always confirm the details of the action you performed (e.g., "I've created the task 'Fly a kite' in the General (GEN) project").
+"""
+
+    messages = [{"role": "system", "content": system_prompt}] + data["messages"]
+
+    try:
+        # Loop to handle tool calls (max 5 iterations to prevent infinite loops)
+        for _ in range(5):
+            response = completion(
+                model=model,
+                messages=messages,
+                api_base=base_url,
+                tools=CHATTABLE_TOOLS,
+                tool_choice="auto"
+            )
+            
+            message = response.choices[0].message
+            messages.append(message)
+
+            if not message.tool_calls:
+                return jsonify({
+                    "message": message.content,
+                    "model": model
+                })
+
+            # Handle tool calls
+            for tool_call in message.tool_calls:
+                tool_name = tool_call.function.name
+                tool_args = json.loads(tool_call.function.arguments)
+                result = execute_chat_tool(tool_name, tool_args)
+                
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_name,
+                    "content": result
+                })
+        
+        # If we hit the loop limit
+        return jsonify({
+            "message": message.content or "I performed several actions for you.",
+            "model": model
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

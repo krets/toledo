@@ -3,3 +3,5 @@ mcp
 uvicorn
 starlette
 uvloop
+litellm
+openai

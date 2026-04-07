@@ -357,6 +357,26 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 }
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
+/* Chat view */
+#chat-view{display:flex;flex-direction:column;height:100%}
+#chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:12px}
+.msg{max-width:85%;padding:10px 14px;border-radius:var(--r);font-size:14px;line-height:1.5;word-break:break-word}
+.msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:2px}
+.msg.ai{align-self:flex-start;background:var(--surface2);color:var(--text);border-bottom-left-radius:2px}
+
+/* Typing indicator */
+.typing{display:flex;gap:4px;padding:10px 14px;background:var(--surface2);border-radius:var(--r);align-self:flex-start;margin-bottom:12px}
+.dot{width:6px;height:6px;background:var(--muted);border-radius:50%;animation:bounce 1.4s infinite ease-in-out both}
+.dot:nth-child(1){animation-delay:-0.32s}
+.dot:nth-child(2){animation-delay:-0.16s}
+@keyframes bounce{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}
+
+#chat-input-wrap{padding:12px;border-top:1px solid var(--border);display:flex;gap:8px;background:var(--surface)}
+#chat-input{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:8px 16px;color:var(--text);font-size:15px;outline:none;font-family:inherit}
+#chat-send{background:var(--accent);color:#fff;border:none;border-radius:50%;width:36px;height:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+#chat-send:disabled{opacity:.5;cursor:not-allowed}
+#chat-send svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2}
+
 /* Scrollbar */
 ::-webkit-scrollbar{width:3px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -371,6 +391,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   <div id="ham-wrap">
     <button id="ham-btn" onclick="App.toggleHamMenu(event)" title="Menu">
       <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+    </button>
+    <button id="chat-btn" onclick="App.setView('chat')" title="Chat" style="background:none;border:none;color:var(--text);cursor:pointer;padding:7px;border-radius:6px;flex-shrink:0;transition:background .15s">
+      <svg viewBox="0 0 24 24" style="width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2;display:block"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     </button>
     <div id="ham-menu">
       <div class="ham-item" onclick="App.setView('search')">
@@ -463,6 +486,8 @@ const App = {
   // Search
   query: '',
   results: [],
+  // Chat
+  chatMessages: [],
 };
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -583,7 +608,65 @@ App.renderMain = function() {
       fab.style.display = 'none';
       back.style.display = 'block';
       break;
+    case 'chat':
+      el.innerHTML = App.buildChatView();
+      fab.style.display = 'none';
+      back.style.display = 'block';
+      App.scrollChat();
+      setTimeout(() => { const i = $('chat-input'); if (i) i.focus(); }, 100);
+      break;
   }
+};
+
+// ── Chat view ─────────────────────────────────────────────────────────────────
+App.buildChatView = function() {
+  const msgs = App.chatMessages.length ? App.chatMessages : [{role:'ai', content:'Hello! I can help you with your tasks. What’s on your mind?'}];
+  let html = `<div id="chat-view"><div id="chat-msgs">`;
+  msgs.forEach(m => {
+    html += `<div class="msg ${m.role}">${mdToHtml(m.content)}</div>`;
+  });
+  if (App.isChatLoading) {
+    html += `<div class="typing"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+  }
+  html += `</div><div id="chat-input-wrap">
+    <input id="chat-input" placeholder="Ask Toledo…" onkeydown="if(event.key==='Enter') App.sendChatMessage()">
+    <button id="chat-send" onclick="App.sendChatMessage()">
+      <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polyline points="22 2 15 22 11 13 2 9 22 2"/></svg>
+    </button>
+  </div></div>`;
+  return html;
+};
+
+App.scrollChat = function() {
+  const m = $('chat-msgs');
+  if (m) m.scrollTop = m.scrollHeight;
+};
+
+App.sendChatMessage = async function() {
+  const inp = $('chat-input');
+  const btn = $('chat-send');
+  const text = inp.value.trim();
+  if (!text || App.isChatLoading) return;
+
+  inp.value = '';
+  inp.disabled = true;
+  btn.disabled = true;
+
+  App.chatMessages.push({ role: 'user', content: text });
+  App.isChatLoading = true;
+  App.renderMain();
+
+  try {
+    const res = await api('POST', '/api/chat', { messages: App.chatMessages });
+    App.chatMessages.push({ role: 'ai', content: res.message });
+  } catch(e) {
+    App.chatMessages.push({ role: 'ai', content: 'Error: ' + e.message });
+  }
+
+  App.isChatLoading = false;
+  inp.disabled = false;
+  btn.disabled = false;
+  App.renderMain();
 };
 
 // ── Tasks view ────────────────────────────────────────────────────────────────
