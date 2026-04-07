@@ -658,7 +658,12 @@ App.sendChatMessage = async function() {
 
   try {
     const res = await api('POST', '/api/chat', { messages: App.chatMessages });
-    App.chatMessages.push({ role: 'ai', content: res.message });
+    App.chatMessages = res.history || App.chatMessages; // Update with history from server
+    if (res.message) {
+      // AI message might already be in history if server returned full history,
+      // but App.chatMessages usually only has messages BEFORE the response.
+      // In the new API, res.history includes the final AI message.
+    }
   } catch(e) {
     App.chatMessages.push({ role: 'ai', content: 'Error: ' + e.message });
   }

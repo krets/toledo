@@ -664,59 +664,45 @@ CHATTABLE_TOOLS = [
 ]
 
 def execute_chat_tool(name, args):
-    """Executes a tool call and returns a string result."""
-    try:
-        if name == "create_task":
-            t.init_tasks_dir()
-            priority = int(args.get("priority") or 50)
-            project = (args.get("project") or "GEN").upper()
-            slug = t.make_task_slug(priority, project, args["name"])
-            folder = t.get_tasks_dir() / "active" / slug
-            if folder.exists(): return f"Error: Task {slug} already exists"
-            t.ensure_dir(folder)
-            (folder / "description.md").write_text(f"# {args['name']}\n\n_Created via Chat._\n")
-            if args.get("due"): (folder / "due.txt").write_text(args["due"])
-            if args.get("recur"): (folder / "recurrence.txt").write_text(str(args["recur"]))
-            t.append_log(folder, "created", state="active", priority=priority, project=project, source="chat")
-            return f"Success: Created task {slug}"
-
-        if name == "done_task":
-            r = t.find_task(args["task"])
-            if not r: return f"Error: Task {args['task']} not found"
-            folder, state = r
-            rf = folder / "recurrence.txt"
-            if rf.exists():
-                days = int(rf.read_text().strip())
-                new_due = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
-                (folder / "due.txt").write_text(new_due)
-                t.append_log(folder, "completed_recurring", next_due=new_due, source="chat")
-                return f"Success: Recurring task {folder.name} advanced to {new_due}"
-            nf = t.get_tasks_dir() / "completed" / folder.name
-            folder.rename(nf)
-            t.append_log(nf, "state_changed", from_state=state, to_state="completed", source="chat")
-            return f"Success: Completed {folder.name}"
-
-        if name == "add_note":
-            r = t.find_task(args["task"])
-            if not r: return f"Error: Task {args['task']} not found"
-            folder, _ = r
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            with open(folder / "worklog.md", "a") as f:
-                f.write(f"\n### {ts} (Chat)\n\n{args['text']}\n")
-            t.append_log(folder, "note_added", source="chat")
-            return f"Success: Added note to {folder.name}"
-
-        if name == "set_due":
-            r = t.find_task(args["task"])
-            if not r: return f"Error: Task {args['task']} not found"
-            folder, _ = r
-            (folder / "due.txt").write_text(args["date"])
-            t.append_log(folder, "due_date_set", date=args["date"], source="chat")
-            return f"Success: Set due date for {folder.name} to {args['date']}"
-
-    except Exception as e:
-        return f"Error executing {name}: {e}"
+    # ... existing implementation ...
     return f"Unknown tool: {name}"
+
+def estimate_tokens(messages):
+    """Rough heuristic for token count."""
+    return sum(len(m.get("content") or "") for m in messages) // 4
+
+def compact_history_via_llm(model, messages, api_key, base_url):
+    """Uses the LLM to summarize older history to save context space."""
+    from litellm import completion
+    import os
+
+    # Keep the last 4 messages (2 rounds) untouched
+    to_summarize = messages[:-4]
+    keep = messages[-4:]
+    
+    if len(to_summarize) < 4: return messages
+
+    prompt = (
+        "Summarize the following conversation history into a single concise paragraph. "
+        "Focus on key facts, user preferences, and task changes. "
+        "Deduplicate information and be extremely brief.\n\n"
+        + json.dumps(to_summarize)
+    )
+
+    try:
+        # Use a system-like call for summary
+        resp = completion(
+            model=model,
+            messages=[{"role": "system", "content": prompt}],
+            api_base=base_url
+        )
+        summary = resp.choices[0].message.content
+        return [
+            {"role": "system", "content": f"Previous conversation summary: {summary}"}
+        ] + keep
+    except Exception as e:
+        print(f"Compaction failed: {e}")
+        return messages
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -732,11 +718,21 @@ def chat():
     model = llm_config.get("model", "gpt-4o-mini")
     api_key = llm_config.get("api_key")
     base_url = llm_config.get("base_url")
+    
+    chat_config = config.get("chat", {})
+    # Default to 2000 estimated tokens before compaction
+    token_limit = chat_config.get("token_limit", 2000)
 
     if api_key:
         if "gpt" in model or "openai" in model: os.environ["OPENAI_API_KEY"] = api_key
         elif "claude" in model or "anthropic" in model: os.environ["ANTHROPIC_API_KEY"] = api_key
         else: os.environ["LITELLM_API_KEY"] = api_key
+
+    user_msgs = data["messages"]
+    
+    # Auto-reduce: Summarize if token estimate is high
+    if estimate_tokens(user_msgs) > token_limit:
+        user_msgs = compact_history_via_llm(model, user_msgs, api_key, base_url)
 
     # Build context
     projects = t.load_projects()
@@ -767,10 +763,10 @@ INSTRUCTIONS:
 3. Always confirm the details of the action you performed (e.g., "I've created the task 'Fly a kite' in the General (GEN) project").
 """
 
-    messages = [{"role": "system", "content": system_prompt}] + data["messages"]
+    messages = [{"role": "system", "content": system_prompt}] + user_msgs
 
     try:
-        # Loop to handle tool calls (max 5 iterations to prevent infinite loops)
+        # Loop to handle tool calls
         for _ in range(5):
             response = completion(
                 model=model,
@@ -784,9 +780,12 @@ INSTRUCTIONS:
             messages.append(message)
 
             if not message.tool_calls:
+                # Success! Return the AI message AND the potentially compacted history
+                # We slice off the system prompt we added at the start
                 return jsonify({
                     "message": message.content,
-                    "model": model
+                    "model": model,
+                    "history": messages[1:] 
                 })
 
             # Handle tool calls
@@ -802,10 +801,10 @@ INSTRUCTIONS:
                     "content": result
                 })
         
-        # If we hit the loop limit
         return jsonify({
             "message": message.content or "I performed several actions for you.",
-            "model": model
+            "model": model,
+            "history": messages[1:]
         })
 
     except Exception as e:

@@ -164,75 +164,22 @@ def cmd_chat(args):
 
     config = load_config()
     server_port = 8000 # Default
-    # Try to find port from docker-compose or similar if possible, 
-    # but for simplicity we assume the server is reachable at localhost:8000 
-    # or the user is running it locally.
+
+    messages = []
     
-    # Actually, we can just use the server logic directly if we want, 
-    # but it's better to keep it decoupled. 
-    # For a CLI 'chat', we'll just hit the server endpoint if it's up, 
-    # or implement a standalone version.
-    # Let's implement it standalone using the same logic as the server 
-    # so it works even without the server running.
-
-    try:
-        from litellm import completion
-    except ImportError:
-        print("✗ litellm not installed. Run 'pip install litellm'")
-        return
-
-    llm_config = config.get("llm", {})
-    model = llm_config.get("model", "gpt-4o-mini")
-    api_key = llm_config.get("api_key")
-    base_url = llm_config.get("api_base") # litellm uses api_base
-
-    if api_key:
-        if "gpt" in model or "openai" in model:
-            os.environ["OPENAI_API_KEY"] = api_key
-        elif "claude" in model or "anthropic" in model:
-            os.environ["ANTHROPIC_API_KEY"] = api_key
-        else:
-            os.environ["LITELLM_API_KEY"] = api_key
-
-    projects = load_projects()
-    tasks = []
-    for state in STATES:
-        sd = get_tasks_dir() / state
-        if not sd.exists(): continue
-        for folder in sd.iterdir():
-            if folder.is_dir():
-                # Minimal task info for CLI chat context to keep it fast
-                info = parse_task_slug(folder.name)
-                df = folder / "due.txt"
-                tasks.append({
-                    "slug": folder.name,
-                    "state": state,
-                    "name": info["name"],
-                    "project": info["project"],
-                    "due": df.read_text().strip() if df.exists() else None
-                })
-
-    system_prompt = f"""You are Toledo AI.
-Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-Context:
-- Projects: {json.dumps(projects)}
-- Tasks: {json.dumps(tasks)}
-
-Help the user manage their tasks.
-"""
-    messages = [{"role": "system", "content": system_prompt}]
-
     if args.message:
         messages.append({"role": "user", "content": " ".join(args.message)})
         try:
             with Spinner():
-                response = completion(model=model, messages=messages, api_base=base_url)
-            print(f"\n{response.choices[0].message.content}\n")
+                r = requests.post(f"http://localhost:{server_port}/api/chat", json={"messages": messages})
+                r.raise_for_status()
+                res = r.json()
+            print(f"\n{res.get('message')}\n")
         except Exception as e:
-            print(f"✗ Error: {e}")
+            print(f"✗ Error: {e} (Is the server running?)")
         return
 
-    print(f"Chatting with Toledo ({model}). Type 'exit' to quit.\n")
+    print(f"Chatting with Toledo (via server). Type 'exit' to quit.\n")
     while True:
         try:
             user_input = input("user> ")
@@ -241,25 +188,20 @@ Help the user manage their tasks.
             
             messages.append({"role": "user", "content": user_input})
             
-            # Use streaming for better UX in CLI
-            # But show a spinner for the initial wait
             with Spinner():
-                response = completion(model=model, messages=messages, api_base=base_url, stream=True)
+                r = requests.post(f"http://localhost:{server_port}/api/chat", json={"messages": messages})
+                r.raise_for_status()
+                res = r.json()
             
-            print("ai> ", end="", flush=True)
-            full_reply = ""
-            for chunk in response:
-                content = chunk.choices[0].delta.content
-                if content:
-                    print(content, end="", flush=True)
-                    full_reply += content
-            print("\n")
-            messages.append({"role": "assistant", "content": full_reply})
+            # Update history from server (compacted if needed)
+            messages = res.get("history", messages)
             
+            print(f"ai> {res.get('message')}\n")
+
         except KeyboardInterrupt:
             print("\nInterrupted."); break
         except Exception as e:
-            print(f"\n✗ Error: {e}")
+            print(f"\n✗ Error: {e} (Is the server running?)")
 
 
 def cmd_init(args):

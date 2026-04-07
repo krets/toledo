@@ -1,5 +1,11 @@
-const CACHE = 'toledo-v2';
-const SHELL = ['/', '/static/index.html', '/manifest.json', '/static/icon-192.svg', '/static/icon-512.svg'];
+const CACHE = 'toledo-v3';
+const SHELL = [
+  '/',
+  '/static/index.html?v=3',
+  '/manifest.json',
+  '/static/icon-192.svg',
+  '/static/icon-512.svg'
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
