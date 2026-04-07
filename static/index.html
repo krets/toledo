@@ -362,7 +362,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 #chat-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:12px}
 .msg{max-width:85%;padding:10px 14px;border-radius:var(--r);font-size:14px;line-height:1.5;word-break:break-word}
 .msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:2px}
-.msg.ai{align-self:flex-start;background:var(--surface2);color:var(--text);border-bottom-left-radius:2px}
+.msg.assistant{align-self:flex-start;background:var(--surface2);color:var(--text);border-bottom-left-radius:2px}
 
 /* Typing indicator */
 .typing{display:flex;gap:4px;padding:10px 14px;background:var(--surface2);border-radius:var(--r);align-self:flex-start;margin-bottom:12px}
@@ -620,10 +620,11 @@ App.renderMain = function() {
 
 // ── Chat view ─────────────────────────────────────────────────────────────────
 App.buildChatView = function() {
-  const msgs = App.chatMessages.length ? App.chatMessages : [{role:'ai', content:'Hello! I can help you with your tasks. What’s on your mind?'}];
+  const msgs = App.chatMessages.length ? App.chatMessages : [{role:'assistant', content:'Hello! I can help you with your tasks. What’s on your mind?'}];
   let html = `<div id="chat-view"><div id="chat-msgs">`;
   msgs.forEach(m => {
-    html += `<div class="msg ${m.role}">${mdToHtml(m.content)}</div>`;
+    if (m.role === 'tool' || m.tool_calls) return; // Hide internal tool messages
+    html += `<div class="msg ${m.role}">${mdToHtml(m.content || '')}</div>`;
   });
   if (App.isChatLoading) {
     html += `<div class="typing"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
@@ -659,13 +660,8 @@ App.sendChatMessage = async function() {
   try {
     const res = await api('POST', '/api/chat', { messages: App.chatMessages });
     App.chatMessages = res.history || App.chatMessages; // Update with history from server
-    if (res.message) {
-      // AI message might already be in history if server returned full history,
-      // but App.chatMessages usually only has messages BEFORE the response.
-      // In the new API, res.history includes the final AI message.
-    }
   } catch(e) {
-    App.chatMessages.push({ role: 'ai', content: 'Error: ' + e.message });
+    App.chatMessages.push({ role: 'assistant', content: 'Error: ' + e.message });
   }
 
   App.isChatLoading = false;

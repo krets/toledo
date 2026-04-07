@@ -19,6 +19,7 @@ t       = importlib.util.module_from_spec(_spec)
 _loader.exec_module(t)
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+BOOT_TIME = int(datetime.now().timestamp())
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -85,8 +86,19 @@ def manifest():
 
 @app.route("/sw.js")
 def sw():
-    resp = send_from_directory("static", "sw.js")
+    from flask import make_response
+    sw_path = Path(app.static_folder) / "sw.js"
+    if not sw_path.exists():
+        return "Not found", 404
+    content = sw_path.read_text()
+    # Replace version placeholders
+    content = content.replace("toledo-v3", f"toledo-{BOOT_TIME}")
+    content = content.replace("?v=3", f"?v={BOOT_TIME}")
+    resp = make_response(content)
+    resp.headers["Content-Type"] = "application/javascript"
     resp.headers["Service-Worker-Allowed"] = "/"
+    # Ensure browsers don't cache sw.js itself too long
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
 
@@ -777,13 +789,14 @@ INSTRUCTIONS:
             )
             
             message = response.choices[0].message
-            messages.append(message)
+            # Convert Message object to a serializable dict (handles tool_calls)
+            msg_dict = message.model_dump() if hasattr(message, "model_dump") else message.dict() if hasattr(message, "dict") else dict(message)
+            messages.append(msg_dict)
 
             if not message.tool_calls:
-                # Success! Return the AI message AND the potentially compacted history
-                # We slice off the system prompt we added at the start
+                # Success! Return the AI message AND the history
                 return jsonify({
-                    "message": message.content,
+                    "message": msg_dict.get("content"),
                     "model": model,
                     "history": messages[1:] 
                 })
@@ -802,7 +815,7 @@ INSTRUCTIONS:
                 })
         
         return jsonify({
-            "message": message.content or "I performed several actions for you.",
+            "message": msg_dict.get("content") or "I performed several actions for you.",
             "model": model,
             "history": messages[1:]
         })
