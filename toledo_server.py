@@ -931,7 +931,7 @@ def chat():
             if folder.is_dir():
                 tasks.append(task_to_dict(folder, state))
 
-    system_prompt = f\"\"\"You are Toledo AI, a task management assistant.
+    system_prompt = f"""You are Toledo AI, a task management assistant.
 Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
 PROJECT CONTEXT:
@@ -948,7 +948,7 @@ INSTRUCTIONS:
    - If the user's request implies a project (e.g., "misc", "random"), use your best judgment to map it to an existing project like "GEN".
    - Default to "GEN" if no project is specified or inferred.
 3. Always confirm the details of the action you performed (e.g., "I've created the task 'Fly a kite' in the General (GEN) project").
-\"\"\"
+"""
 
     messages = [{"role": "system", "content": system_prompt}] + user_msgs
 
