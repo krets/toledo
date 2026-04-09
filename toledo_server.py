@@ -943,7 +943,14 @@ TASK CONTEXT (current state):
 
 INSTRUCTIONS:
 1. Help the user manage their tasks using the provided tools.
-2. When creating a task, use the PROJECT CONTEXT to find the most appropriate project code.
+2. PRIORITY SYSTEM: Toledo uses a "lower is higher" priority system.
+   - 0-24: Ultra High
+   - 25: High
+   - 50: Medium
+   - 75: Low
+   - 100+: Very Low
+   - When the user asks for "high priority" tasks, look for those with the LOWEST numerical values.
+3. When creating a task, use the PROJECT CONTEXT to find the most appropriate project code.
    - If the user mentions a project by name (e.g., "General", "Work"), map it to the corresponding code (e.g., "GEN", "JOB").
    - If the user's request implies a project (e.g., "misc", "random"), use your best judgment to map it to an existing project like "GEN".
    - Default to "GEN" if no project is specified or inferred.
