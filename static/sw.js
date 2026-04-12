@@ -1,10 +1,12 @@
-const CACHE = 'toledo-v4'; // Incremented version
+const CACHE = 'toledo-v5'; // Incremented version
 const SHELL = [
   '/',
-  '/static/index.html?v=4',
+  '/static/index.html?v=5',
   '/manifest.json',
-  '/static/icon-192.svg',
-  '/static/icon-512.svg'
+  '/static/icon-192.png',
+  '/static/icon-512.png',
+  '/static/favicon.ico',
+  '/static/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', e => {
