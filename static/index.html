@@ -3,13 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#6b9ce8">
+<meta name="theme-color" content="#7a6acc">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="TOleDO">
 <title>TOleDO</title>
 <link rel="manifest" href="/manifest.json">
-<link rel="apple-touch-icon" href="/static/icon-192.svg">
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
 <style>
@@ -18,8 +19,8 @@
   --surface:   #1a1a1a;
   --surface2:  #242424;
   --surface3:  #2e2e2e;
-  --accent:    #6b9ce8;
-  --accent-dim:rgba(107,156,232,0.15);
+  --accent:    #7a6acc;
+  --accent-dim:rgba(122,106,204,0.15);
   --danger:    #e74c3c;
   --warning:   #f0a500;
   --success:   #2ecc71;
@@ -38,6 +39,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   position:fixed;top:0;left:0;right:0;height:var(--top);
   background:var(--surface);border-bottom:1px solid var(--border);
   display:flex;align-items:center;padding:0 10px 0 14px;z-index:100;gap:8px;
+}
+.brand-icon{
+  width:24px;height:24px;border-radius:4px;flex-shrink:0;
 }
 .back-btn{
   background:none;border:none;color:var(--accent);cursor:pointer;
@@ -387,6 +391,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 <div id="topbar">
   <button class="back-btn" id="back-btn" onclick="App.goHome()" style="display:none">‹</button>
+  <img src="/static/icon-192.png" class="brand-icon" alt="TOleDO Logo">
   <h1 class="brand">TOleDO</h1>
   <div id="ham-wrap">
     <button id="ham-btn" onclick="App.toggleHamMenu(event)" title="Menu">
