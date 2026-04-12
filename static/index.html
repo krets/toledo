@@ -504,10 +504,20 @@ async function api(method, path, body) {
     opts.body = JSON.stringify(body); 
     opts.headers['Content-Type'] = 'application/json'; 
   }
-  const r = await fetch(path, opts);
+  let r;
+  try {
+    r = await fetch(path, opts);
+  } catch (e) {
+    // If fetch fails completely, it might be a CORS block on an unhandled redirect
+    // Try to recover by a top-level redirect if we think it's auth-related
+    console.error('API Fetch Failure:', e);
+    window.location.href = 'https://auth.krets.com/auth/refresh?redirect=' + encodeURIComponent(window.location.href);
+    return new Promise(() => {});
+  }
+
   if (r.status === 401) {
     window.location.href = 'https://auth.krets.com/auth/refresh?redirect=' + encodeURIComponent(window.location.href);
-    return new Promise(() => {}); // Halt further execution while redirecting
+    return new Promise(() => {});
   }
   if (!r.ok) {
     const e = await r.json().catch(() => ({ error: r.statusText }));

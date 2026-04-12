@@ -1,7 +1,7 @@
-const CACHE = 'toledo-v3';
+const CACHE = 'toledo-v4'; // Incremented version
 const SHELL = [
   '/',
-  '/static/index.html?v=3',
+  '/static/index.html?v=4',
   '/manifest.json',
   '/static/icon-192.svg',
   '/static/icon-512.svg'
@@ -24,14 +24,9 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (url.pathname.startsWith('/api/')) {
-    // Network-first for API calls
-    e.respondWith(
-      fetch(e.request).catch(() =>
-        new Response(JSON.stringify({ error: 'offline' }), {
-          headers: { 'Content-Type': 'application/json' }
-        })
-      )
-    );
+    // Network-only for API calls to ensure auth state is always fresh
+    // We remove the .catch() so that 401s and network errors propagate to the app
+    e.respondWith(fetch(e.request));
   } else {
     // Cache-first for app shell
     e.respondWith(
