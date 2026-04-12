@@ -1,7 +1,7 @@
-const CACHE = 'toledo-v5'; // Incremented version
+const CACHE = 'toledo-v6'; // Incremented version
 const SHELL = [
   '/',
-  '/static/index.html?v=5',
+  '/static/index.html?v=6',
   '/manifest.json',
   '/static/icon-192.png',
   '/static/icon-512.png',

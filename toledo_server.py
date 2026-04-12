@@ -608,6 +608,73 @@ def clear_ctx():
     return jsonify({"context": None})
 
 
+@app.route("/api/status", methods=["GET"])
+def get_status():
+    projects = t.load_projects()
+    tasks = []
+    # Only include active tasks as requested
+    sd = t.get_tasks_dir() / "active"
+    if sd.exists():
+        for folder in sd.iterdir():
+            if folder.is_dir():
+                tasks.append(task_to_dict(folder, "active"))
+
+    # Format Projects as Markdown
+    projects_md = "\n".join([f"- **{code}**: {p['name'] if isinstance(p, dict) else p}" for code, p in projects.items()])
+
+    # Format Tasks as Markdown
+    tasks_md = ""
+    if not tasks:
+        tasks_md = "_No active tasks._\n"
+    else:
+        for tk in tasks:
+            due_str = f", Due: {tk['due']}" if tk.get('due') else ""
+            recur_str = f", Recur: {tk['recurrence']}d" if tk.get('recurrence') else ""
+            tasks_md += f"- **{tk['name']}** (`{tk['slug']}`)\n  - Project: {tk['project']}, Priority: {tk['priority']}{due_str}{recur_str}\n"
+
+    status_text = f"""# TOLEDO SYSTEM STATUS
+**Current Time:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+## PROJECT CONTEXT
+{projects_md}
+
+## ACTIVE TASKS
+{tasks_md}
+
+## PRIORITY SYSTEM
+Toledo uses a "lower is higher" numerical priority system:
+- **00-24**: Ultra High
+- **25**: High
+- **50**: Medium
+- **75**: Low
+- **99+**: Very Low
+
+## AVAILABLE OPERATIONS
+You can ask the Toledo AI to perform the following actions. When responding, provide a concise list of these operations that the user can paste into the Toledo chat bubble:
+
+- **Create Task**: `create_task(name, project="GEN", priority=50, due="YYYY-MM-DD", recur=0)`
+- **Complete Task**: `done_task(task_slug_or_name)`
+- **Add Note**: `add_note(task, text)`
+- **Set Due Date**: `set_due(task, date="YYYY-MM-DD")`
+- **Change Priority**: `reprioritize(task, priority)`
+- **Change Project**: `reproject(task, project_code)`
+- **Edit Description**: `edit_desc(task, text)`
+- **Rename Task**: `rename_task(task, new_name)`
+- **Add Subtask**: `add_subtask(parent_task, name, priority=50, due=None)`
+- **Complete Subtask**: `done_subtask(parent_task, subtask_slug)`
+- **Undo Subtask**: `undo_subtask(parent_task, subtask_slug)`
+- **Rename Subtask**: `rename_subtask(parent_task, subtask_slug, new_name)`
+- **Move Task State**: `move_task(task, state="active|completed|archive")`
+- **Cancel Recurrence**: `cancel_recurrence(task)`
+- **Archive Task**: `archive_task(task)`
+- **Delete Task**: `delete_task(task)`
+
+**Instruction for Assistant:**
+Please take these details and remember them, just acknowldge that you are ready to start. At some point I will ask for a plan update. Only then, provide the final set of instructions as a clear list of actions (e.g., "Create a task for...", "Mark 'x' as done", etc.) so that I can copy them into my other todo system.
+"""
+    return jsonify({"status": status_text})
+
+
 # ── Chat / LLM ────────────────────────────────────────────────────────────────
 
 CHATTABLE_TOOLS = [
