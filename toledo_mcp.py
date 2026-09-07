@@ -11,6 +11,7 @@ Claude config:
 """
 
 import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
 import json
@@ -21,7 +22,7 @@ from pathlib import Path
 import mcp.types as types
 import uvicorn
 from mcp.server import Server
-from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.routing import Route
 
@@ -830,32 +831,30 @@ async def read_resource(uri: types.AnyUrl) -> str:
     raise ValueError(f"Unknown resource: {uri_str}")
 
 
-# ── Starlette / SSE transport ─────────────────────────────────────────────────
+# ── Starlette / Streamable HTTP transport ──────────────────────────────────────
 
-sse_transport = SseServerTransport("/mcp/messages")
-
-
-async def handle_sse(request):
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
-        await server.run(
-            streams[0], streams[1],
-            server.create_initialization_options(),
-        )
+session_manager = StreamableHTTPSessionManager(app=server)
 
 
-async def handle_messages(request):
-    await sse_transport.handle_post_message(
-        request.scope, request.receive, request._send
-    )
+class StreamableHTTPASGIApp:
+    """Plain ASGI callable so Starlette routes to it directly instead of
+    treating it as a request/response endpoint function."""
+
+    async def __call__(self, scope, receive, send):
+        await session_manager.handle_request(scope, receive, send)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    async with session_manager.run():
+        yield
 
 
 starlette_app = Starlette(
     routes=[
-        Route("/mcp/sse",      endpoint=handle_sse),
-        Route("/mcp/messages", endpoint=handle_messages, methods=["POST"]),
-    ]
+        Route("/mcp/sse", endpoint=StreamableHTTPASGIApp(), methods=["GET", "POST", "DELETE"]),
+    ],
+    lifespan=lifespan,
 )
 
 # ── Entry point ───────────────────────────────────────────────────────────────
