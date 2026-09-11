@@ -174,6 +174,57 @@ def fmt_task_detail(d: dict) -> str:
     return "\n".join(lines)
 
 
+def _rename_project_code(old_code: str, new_code: str) -> int:
+    """Rename a project's code across every task/subtask slug that uses it.
+    Raises before changing anything if the rename would collide with an
+    existing slug. Returns the number of top-level tasks moved."""
+
+    def slug_for(info: dict, new_project: str) -> str:
+        return f"{info['priority']:02d}-{new_project}-{info['name'].replace(' ', '-')}"
+
+    task_moves: list[tuple[Path, Path]] = []
+    subtask_moves: list[tuple[Path, Path]] = []
+    seen: set[Path] = set()
+
+    def plan(folder: Path, new_folder: Path, bucket: list) -> None:
+        if new_folder.exists() or new_folder in seen:
+            raise ValueError(f"Cannot rename: '{new_folder.name}' already exists")
+        seen.add(new_folder)
+        bucket.append((folder, new_folder))
+
+    for state in t.STATES:
+        sd = t.get_tasks_dir() / state
+        if not sd.exists():
+            continue
+        for folder in sorted(sd.iterdir()):
+            if not folder.is_dir():
+                continue
+            info = t.parse_task_slug(folder.name)
+            if info["project"] == old_code:
+                plan(folder, sd / slug_for(info, new_code), task_moves)
+            for ss in t.SUBTASK_STATES:
+                sub_dir = folder / "subtasks" / ss
+                if not sub_dir.exists():
+                    continue
+                for sub in sorted(sub_dir.iterdir()):
+                    if not sub.is_dir():
+                        continue
+                    sinfo = t.parse_task_slug(sub.name)
+                    if sinfo["project"] == old_code:
+                        plan(sub, sub_dir / slug_for(sinfo, new_code), subtask_moves)
+
+    # Subtasks first, while their parent folder is still at its original path.
+    for sub, new_sub in subtask_moves:
+        sub.rename(new_sub)
+    for folder, new_folder in task_moves:
+        folder.rename(new_folder)
+        if t.get_context() == folder.name:
+            t.set_context(new_folder.name)
+        t.append_log(new_folder, "project_renamed", old_project=old_code, new_project=new_code)
+
+    return len(task_moves)
+
+
 def resolve_task(partial: str):
     """Return (folder, state) or raise ValueError."""
     r = t.find_task(partial)
@@ -440,6 +491,39 @@ async def list_tools() -> list[types.Tool]:
                     "code": {"type": "string"},
                 },
                 "required": ["code"],
+            },
+        ),
+        types.Tool(
+            name="rename_project",
+            description=(
+                "Rename a project's code (e.g. PRJ -> WORK), updating projects.json and "
+                "every task/subtask slug that uses it in one operation. Fails without "
+                "changing anything if the new code already exists as a distinct project "
+                "— use merge_projects for that case instead."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "old_code": {"type": "string", "description": "Existing project code"},
+                    "new_code": {"type": "string", "description": "New project code"},
+                },
+                "required": ["old_code", "new_code"],
+            },
+        ),
+        types.Tool(
+            name="merge_projects",
+            description=(
+                "Merge one project into another: moves every task and subtask from "
+                "from_code to into_code, then removes from_code from the project "
+                "registry. into_code must already exist."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "from_code": {"type": "string", "description": "Project code to merge away"},
+                    "into_code": {"type": "string", "description": "Project code to merge into (must already exist)"},
+                },
+                "required": ["from_code", "into_code"],
             },
         ),
         types.Tool(
@@ -836,6 +920,42 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         t.save_projects(projects)
         return ok(f"Removed project '{code}'")
 
+    # ── rename_project ────────────────────────────────────────────────────────
+    if name == "rename_project":
+        old_code = args["old_code"].upper().strip()
+        new_code = args["new_code"].upper().strip()
+        if not old_code or not new_code:
+            raise ValueError("old_code and new_code are required")
+        if old_code == new_code:
+            raise ValueError("old_code and new_code are the same")
+        projects = t.load_projects()
+        if old_code not in projects:
+            raise ValueError(f"Project '{old_code}' not found")
+        if new_code in projects:
+            raise ValueError(f"Project '{new_code}' already exists — use merge_projects instead")
+        count = _rename_project_code(old_code, new_code)
+        projects[new_code] = projects.pop(old_code)
+        t.save_projects(projects)
+        return ok(f"Renamed project '{old_code}' → '{new_code}' ({count} task(s) updated)")
+
+    # ── merge_projects ────────────────────────────────────────────────────────
+    if name == "merge_projects":
+        from_code = args["from_code"].upper().strip()
+        into_code = args["into_code"].upper().strip()
+        if not from_code or not into_code:
+            raise ValueError("from_code and into_code are required")
+        if from_code == into_code:
+            raise ValueError("from_code and into_code are the same")
+        projects = t.load_projects()
+        if from_code not in projects:
+            raise ValueError(f"Project '{from_code}' not found")
+        if into_code not in projects:
+            raise ValueError(f"Project '{into_code}' not found — create it first with add_project")
+        count = _rename_project_code(from_code, into_code)
+        del projects[from_code]
+        t.save_projects(projects)
+        return ok(f"Merged '{from_code}' into '{into_code}' ({count} task(s) moved), removed '{from_code}'")
+
     # ── update_glossary ───────────────────────────────────────────────────────
     if name == "update_glossary":
         term      = args["term"].strip()
@@ -984,10 +1104,11 @@ to archive) or permanently deleting (delete_task) anything.
 
 2. Call list_projects and review the category structure itself: rename, split, merge, or \
 otherwise refine categories to make daily use easier. The current categories are not \
-guaranteed to be optimal long-term — don't assume they are. Use add_project, remove_project, \
-and reproject_task as needed.
+guaranteed to be optimal long-term — don't assume they are. Use rename_project to rename a \
+code in place (updates every task/subtask slug under it), merge_projects to fold one category \
+into another, and add_project/remove_project for brand-new or now-empty categories.
 
-3. Reassign miscategorized tasks to better-fitting categories via reproject_task.
+3. Reassign individually miscategorized tasks to better-fitting categories via reproject_task.
 
 4. Open a capture window: ask the user for anything new — tasks, ideas, projects — that \
 surfaced during this review. Similar in spirit to the evening brain dump, but focused on \
