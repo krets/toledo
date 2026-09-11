@@ -54,6 +54,24 @@ def proj_name(code: str) -> str:
     return str(val) if val else code
 
 
+def last_updated(folder: Path) -> str | None:
+    """ISO timestamp of the most recent activity.log entry, falling back to mtime."""
+    log_f = folder / "activity.log"
+    if log_f.exists():
+        ts = None
+        for line in log_f.read_text().splitlines():
+            try:
+                ts = json.loads(line).get("ts", ts)
+            except Exception:
+                pass
+        if ts:
+            return ts
+    try:
+        return datetime.fromtimestamp(folder.stat().st_mtime).isoformat()
+    except Exception:
+        return None
+
+
 def task_to_dict(folder: Path, state: str, detail: bool = False) -> dict:
     info = t.parse_task_slug(folder.name)
     df = folder / "due.txt"
@@ -69,6 +87,7 @@ def task_to_dict(folder: Path, state: str, detail: bool = False) -> dict:
         "due":         df.read_text().strip() if df.exists() else None,
         "recurrence":  int(rf.read_text().strip()) if rf.exists() else None,
         "overdue":     t.is_overdue(folder),
+        "updated":     last_updated(folder),
     }
     if detail:
         desc_f = folder / "description.md"
@@ -107,9 +126,10 @@ def fmt_task_line(d: dict) -> str:
         done  = sum(1 for s in d["subtasks"] if s["state"] == "completed")
         total = len(d["subtasks"])
         subs  = f"  [{done}/{total} subtasks]"
+    upd = f"  upd:{d['updated'][:16].replace('T', ' ')}" if d.get("updated") else ""
     return (
         f"[{d['pri_label']:10s}] [{d['project_name']:12s}] {d['name']}"
-        f"  ({d['slug']}){due}{rec}{subs}"
+        f"  ({d['slug']}){due}{rec}{subs}{upd}"
     )
 
 
@@ -121,6 +141,8 @@ def fmt_task_detail(d: dict) -> str:
         f"Priority: {d['priority']} — {d['pri_label']}",
         f"Project:  {d['project_name']} ({d['project']})",
     ]
+    if d.get("updated"):
+        lines.append(f"Updated:  {d['updated'][:16].replace('T', ' ')}")
     if d["due"]:
         lines.append(f"Due:      {'⚠ OVERDUE — ' if d['overdue'] else ''}{d['due']}")
     if d["recurrence"]:
@@ -181,7 +203,9 @@ async def list_tools() -> list[types.Tool]:
             name="list_tasks",
             description=(
                 "List tasks. By default returns active tasks. "
-                "Filter by state (active/completed/archive/all) and/or project code."
+                "Filter by state (active/completed/archive/all) and/or project code. "
+                "Each task shows its last-updated timestamp; sort or filter by recency "
+                "with 'sort' and 'updated_within_days'."
             ),
             inputSchema={
                 "type": "object",
@@ -190,6 +214,10 @@ async def list_tools() -> list[types.Tool]:
                                 "description": "Filter by task state (default: active)"},
                     "project": {"type": "string",
                                 "description": "Filter by project code (e.g. JOB, HLT)"},
+                    "sort":    {"type": "string", "enum": ["default", "recent"],
+                                "description": "'recent' sorts by last-updated, newest first (default: creation order)"},
+                    "updated_within_days": {"type": "integer",
+                                "description": "Only include tasks updated within the last N days"},
                 },
             },
         ),
@@ -436,6 +464,8 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     if name == "list_tasks":
         state_filter   = args.get("state", "active")
         project_filter = (args.get("project") or "").upper() or None
+        sort           = args.get("sort", "default")
+        updated_within = args.get("updated_within_days")
         states = t.STATES if state_filter == "all" else [state_filter]
         lines  = []
         for state in states:
@@ -445,12 +475,18 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             tasks = [f for f in sorted(sd.iterdir()) if f.is_dir()]
             if project_filter:
                 tasks = [f for f in tasks if t.parse_task_slug(f.name)["project"] == project_filter]
-            if not tasks:
+            dicts = [task_to_dict(f, state) for f in tasks]
+            if updated_within is not None:
+                cutoff = (datetime.now() - timedelta(days=int(updated_within))).isoformat()
+                dicts = [d for d in dicts if d["updated"] and d["updated"] >= cutoff]
+            if sort == "recent":
+                dicts.sort(key=lambda d: d["updated"] or "", reverse=True)
+            if not dicts:
                 continue
             if state_filter == "all":
                 lines.append(f"\n── {state.upper()} ──")
-            for f in tasks:
-                lines.append(fmt_task_line(task_to_dict(f, state)))
+            for d in dicts:
+                lines.append(fmt_task_line(d))
         if not lines:
             return ok("No tasks found.")
         return ok("\n".join(lines))
