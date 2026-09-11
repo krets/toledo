@@ -543,6 +543,49 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["term", "canonical"],
             },
         ),
+        types.Tool(
+            name="list_resources",
+            description=(
+                "List Toledo's MCP resources (uri, name, description) — status, projects, "
+                "active tasks, glossary. Exists for clients that only surface MCP tools, not "
+                "the resources capability; fetch a resource's contents with get_resource."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="get_resource",
+            description="Fetch the contents of a Toledo resource by uri (see list_resources).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string", "description": "Resource uri, e.g. 'toledo://status'"},
+                },
+                "required": ["uri"],
+            },
+        ),
+        types.Tool(
+            name="list_prompts",
+            description=(
+                "List Toledo's MCP prompts (name, description) — end_of_day_dump, "
+                "morning_planning, periodic_audit. Exists for clients that only surface MCP "
+                "tools, not the prompts capability; fetch a prompt's text with get_prompt."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="get_prompt",
+            description=(
+                "Fetch the full instructions for a Toledo prompt by name (see list_prompts). "
+                "Follow the returned instructions as if the user had invoked that prompt."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Prompt name, e.g. 'morning_planning'"},
+                },
+                "required": ["name"],
+            },
+        ),
     ]
 
 
@@ -966,6 +1009,30 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         glossary[term.lower()] = canonical
         t.save_glossary(glossary)
         return ok(f"Glossary: '{term}' → '{canonical}'")
+
+    # ── list_resources / get_resource (tool mirrors of the resources capability) ─
+    if name == "list_resources":
+        resources = await list_resources()
+        return ok("\n".join(f"{r.uri} — {r.name}: {r.description}" for r in resources))
+
+    if name == "get_resource":
+        uri = args.get("uri", "").strip()
+        if not uri:
+            raise ValueError("uri is required")
+        text = await read_resource(types.AnyUrl(uri))
+        return ok(text)
+
+    # ── list_prompts / get_prompt (tool mirrors of the prompts capability) ──────
+    if name == "list_prompts":
+        prompts = await list_prompts()
+        return ok("\n\n".join(f"{p.name}: {p.description}" for p in prompts))
+
+    if name == "get_prompt":
+        prompt_name = args.get("name", "").strip()
+        if not prompt_name:
+            raise ValueError("name is required")
+        result = await get_prompt(prompt_name, None)
+        return ok(result.messages[0].content.text)
 
     return err(f"Unknown tool: {name}")
 
