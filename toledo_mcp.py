@@ -442,6 +442,23 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["code"],
             },
         ),
+        types.Tool(
+            name="update_glossary",
+            description=(
+                "Add or update a glossary entry mapping a raw/garbled term to its canonical "
+                "form (e.g. a misheard proper noun). Used to make the glossary self-healing "
+                "so the same term is never asked about twice. Read the current glossary via "
+                "the toledo://glossary resource."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "term":      {"type": "string", "description": "Raw or garbled term as it appeared"},
+                    "canonical": {"type": "string", "description": "Confirmed canonical form/meaning"},
+                },
+                "required": ["term", "canonical"],
+            },
+        ),
     ]
 
 
@@ -819,6 +836,17 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         t.save_projects(projects)
         return ok(f"Removed project '{code}'")
 
+    # ── update_glossary ───────────────────────────────────────────────────────
+    if name == "update_glossary":
+        term      = args["term"].strip()
+        canonical = args["canonical"].strip()
+        if not term or not canonical:
+            raise ValueError("term and canonical are required")
+        glossary = t.load_glossary()
+        glossary[term.lower()] = canonical
+        t.save_glossary(glossary)
+        return ok(f"Glossary: '{term}' → '{canonical}'")
+
     return err(f"Unknown tool: {name}")
 
 
@@ -845,6 +873,12 @@ async def list_resources() -> list[types.Resource]:
             description="All currently active tasks",
             mimeType="text/plain",
         ),
+        types.Resource(
+            uri="toledo://glossary",
+            name="Toledo Glossary",
+            description="Self-healing glossary of proper nouns/terms, mutated via update_glossary",
+            mimeType="text/plain",
+        ),
     ]
 
 
@@ -864,7 +898,152 @@ async def read_resource(uri: types.AnyUrl) -> str:
         result = await _dispatch("list_tasks", {"state": "active"})
         return result[0].text
 
+    if uri_str == "toledo://glossary":
+        glossary = t.load_glossary()
+        if not glossary:
+            return "No glossary entries yet."
+        return "\n".join(f"{term} → {canonical}" for term, canonical in sorted(glossary.items()))
+
     raise ValueError(f"Unknown resource: {uri_str}")
+
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
+
+def _prompt_message(text: str) -> types.PromptMessage:
+    return types.PromptMessage(role="user", content=types.TextContent(type="text", text=text))
+
+
+END_OF_DAY_DUMP_PROMPT = """\
+You are running Toledo's end-of-day brain dump ("end of day dump" / "daily brain dump"). \
+Follow this sequence:
+
+1. Invite the user to talk freely about their day — no structure imposed, no questions yet. \
+Let them dump everything: what they did, what came up, half-formed ideas, names, decisions. \
+Do not interrupt to ask clarifying questions during this phase.
+
+2. Once they're done, read the toledo://glossary resource. Scan their dump for proper nouns, \
+project names, and terms that don't clearly match a glossary entry or an existing Toledo \
+task/project name. Collect every ambiguous term into ONE batched round of clarifying \
+questions — never one at a time. For each term the user resolves, call update_glossary to \
+persist the mapping (term → canonical form) so it is never asked about again. The glossary is \
+healed via that tool, not by editing this prompt.
+
+3. Call list_tasks (state=active) to get current open tasks. Cross-reference what the user \
+mentioned against that list. Where it's ambiguous whether something is done, still in \
+progress, or abandoned, batch those into one more round of status questions.
+
+4. Write back to Toledo from the answers:
+   - done_task for anything completed.
+   - add_note on tasks that progressed but aren't done, summarizing what happened.
+   - create_task for anything mentioned that isn't already tracked.
+
+5. Generate a dated Markdown artifact ("Toledo Journal — YYYY-MM-DD") summarizing the raw dump \
+and the outcomes of this session, as a journal stub until an Obsidian integration replaces this \
+step. Rendering that artifact is on you, the calling agent — the Toledo server has no part in it.
+
+6. Close by surfacing a short next-day priority list pulled from the now-updated Toledo state \
+(list_tasks and/or upcoming_tasks). Weight it by urgency, not a fixed count — a few Ultra High \
+or overdue items beats padding out a round number.
+"""
+
+MORNING_PLANNING_PROMPT = """\
+You are running Toledo's morning planning session ("what should I work on"). Follow this \
+sequence:
+
+1. Call list_tasks (state=active) and derive the distinct categories/projects actually \
+present — do not hard-code a category list, since categories get renamed, split, or merged \
+during the periodic audit. Use list_projects for display names.
+
+2. Ask the user which category/lane to focus on today (for example freelance income, \
+household, personal projects). If a dedicated goals project/category exists (quarter-level \
+targets set during the periodic audit), you may surface relevant goals to help them choose.
+
+3. Within the chosen category, call list_tasks filtered to that project — use sort=recent \
+where it helps — and surface tasks weighted by urgency: approaching deadlines and recurring \
+tasks nearing their cycle date first. Do NOT hard-filter out undated tasks; many chores and \
+goals have no due date and are still worth surfacing.
+
+4. Stay interactive throughout the conversation: if the user mentions in passing that \
+something is already done, or a date should move, write it back to Toledo immediately — \
+done_task, set_due, add_note, or reprioritize_task — rather than deferring to the evening \
+dump. The goal is a single reliable source of truth; nothing should fall through the cracks \
+between this prompt and the evening one.
+
+5. Where useful, check recency (sort=recent / updated_within_days) within the selected \
+category so a stale-looking task doesn't get silently skipped.
+"""
+
+PERIODIC_AUDIT_PROMPT = """\
+You are running Toledo's periodic audit and goals refinement (roughly every 3–6 months). \
+This is a structural review, not daily triage — day-to-day drift is already handled live by \
+the morning planning prompt. Follow this sequence:
+
+1. Call list_tasks (state=all) and review for staleness: tasks that no longer matter, \
+duplicates, or things quietly superseded. Confirm with the user before archiving (move_task \
+to archive) or permanently deleting (delete_task) anything.
+
+2. Call list_projects and review the category structure itself: rename, split, merge, or \
+otherwise refine categories to make daily use easier. The current categories are not \
+guaranteed to be optimal long-term — don't assume they are. Use add_project, remove_project, \
+and reproject_task as needed.
+
+3. Reassign miscategorized tasks to better-fitting categories via reproject_task.
+
+4. Open a capture window: ask the user for anything new — tasks, ideas, projects — that \
+surfaced during this review. Similar in spirit to the evening brain dump, but focused on \
+structure rather than daily narrative. Create tasks via create_task for anything raised.
+
+5. Sanity-check the goals category (quarter-level overarching targets): does it exist, is it \
+stale, does it need updating? If no goals project/category exists yet, offer to create one. \
+Live week-to-week goal adjustments happen in the morning planning prompt, not here — this is \
+just a staleness check.
+
+6. Before finishing, make sure a recurring Toledo task exists that reminds the user to re-run \
+this audit in 3–6 months (self-referential: it should surface again through the morning \
+prompt). Create or update one via create_task / set_due if it's missing or overdue.
+"""
+
+
+@server.list_prompts()
+async def list_prompts() -> list[types.Prompt]:
+    return [
+        types.Prompt(
+            name="end_of_day_dump",
+            description=(
+                "End-of-day / daily brain dump: freeform talk, reconcile against Toledo "
+                "tasks and a self-healing glossary, write back updates, and close with a "
+                "journal summary and next-day priorities. "
+                "Trigger phrases: 'end of day dump', 'daily brain dump'."
+            ),
+        ),
+        types.Prompt(
+            name="morning_planning",
+            description=(
+                "Morning 'what should I work on' session: pick a category, surface "
+                "urgency-weighted tasks in it, and write back live as things come up in "
+                "conversation."
+            ),
+        ),
+        types.Prompt(
+            name="periodic_audit",
+            description=(
+                "Periodic (3-6 month) deep audit: prune stale tasks, refine categories, "
+                "recategorize, open a capture window, and sanity-check quarter-level goals."
+            ),
+        ),
+    ]
+
+
+@server.get_prompt()
+async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPromptResult:
+    prompts = {
+        "end_of_day_dump":   END_OF_DAY_DUMP_PROMPT,
+        "morning_planning":  MORNING_PLANNING_PROMPT,
+        "periodic_audit":    PERIODIC_AUDIT_PROMPT,
+    }
+    if name not in prompts:
+        raise ValueError(f"Unknown prompt: {name}")
+    return types.GetPromptResult(messages=[_prompt_message(prompts[name])])
 
 
 # ── Starlette / Streamable HTTP transport ──────────────────────────────────────

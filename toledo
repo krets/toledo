@@ -105,6 +105,16 @@ def save_projects(p):
     pf = get_tasks_dir() / "projects.json"
     pf.write_text(json.dumps(p, indent=2))
 
+def load_glossary():
+    gf = get_tasks_dir() / "glossary.json"
+    if not gf.exists():
+        return {}
+    return json.loads(gf.read_text())
+
+def save_glossary(g):
+    gf = get_tasks_dir() / "glossary.json"
+    gf.write_text(json.dumps(g, indent=2))
+
 def proj_display_name(projects, code):
     """Return the display name for a project code."""
     val = projects.get(code)
