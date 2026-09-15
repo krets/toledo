@@ -385,6 +385,21 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="set_recurrence",
+            description=(
+                "Set, update, or clear a task's recurrence interval (days). "
+                "Recurring tasks advance their due date instead of completing when done_task is called."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task":     {"type": "string"},
+                    "interval": {"type": "integer", "description": "Repeat every N days, or 0 to clear recurrence"},
+                },
+                "required": ["task", "interval"],
+            },
+        ),
+        types.Tool(
             name="add_note",
             description="Append a timestamped note to a task's worklog.",
             inputSchema={
@@ -779,6 +794,23 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
                 t.append_log(folder, "due_cleared")
             return ok("Due date cleared")
 
+    # ── set_recurrence ────────────────────────────────────────────────────────
+    if name == "set_recurrence":
+        folder, _ = resolve_task(args["task"])
+        interval = int(args.get("interval") or 0)
+        if interval < 0:
+            raise ValueError("interval must be 0 or a positive number of days")
+        rf = folder / "recurrence.txt"
+        if interval:
+            rf.write_text(str(interval))
+            t.append_log(folder, "recurrence_set", interval=interval)
+            return ok(f"Recurrence set to every {interval} days")
+        else:
+            if rf.exists():
+                rf.unlink()
+                t.append_log(folder, "recurrence_cleared")
+            return ok("Recurrence cleared")
+
     # ── add_note ──────────────────────────────────────────────────────────────
     if name == "add_note":
         folder, _ = resolve_task(args["task"])
@@ -854,6 +886,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     # ── search_tasks ──────────────────────────────────────────────────────────
     if name == "search_tasks":
         query = args["query"].lower()
+        query_norm = query.replace("-", " ")
         results = []
         for state in t.STATES:
             sd = t.get_tasks_dir() / state
@@ -863,7 +896,8 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
                 if not folder.is_dir():
                     continue
                 hits = []
-                if query in folder.name.lower():
+                name_norm = folder.name.lower().replace("-", " ")
+                if query in folder.name.lower() or query_norm in name_norm:
                     hits.append("name")
                 for fname in ("description.md", "worklog.md"):
                     f = folder / fname
