@@ -1241,8 +1241,9 @@ or overdue items beats padding out a round number.
 """
 
 MORNING_PLANNING_PROMPT = """\
-You are running Toledo's morning planning session ("what should I work on"). Follow this \
-sequence:
+You are running Toledo's morning planning session ("what should I work on"). Changes that \
+come up during the session are held and committed together at the end, not applied live. Tell \
+the user this at the start, in one line. Follow this sequence:
 
 1. Call list_tasks (state=active) and derive the distinct categories/projects actually \
 present — do not hard-code a category list, since categories get renamed, split, or merged \
@@ -1257,20 +1258,43 @@ where it helps — and surface tasks weighted by urgency: approaching deadlines 
 tasks nearing their cycle date first. Do NOT hard-filter out undated tasks; many chores and \
 goals have no due date and are still worth surfacing.
 
-4. Stay interactive throughout the conversation: if the user mentions in passing that \
-something is already done, or a date should move, write it back to Toledo immediately — \
-done_task, set_due, add_note, or reprioritize_task — rather than deferring to the evening \
-dump. The goal is a single reliable source of truth; nothing should fall through the cracks \
-between this prompt and the evening one.
+4. Stay interactive throughout the conversation, but HOLD changes instead of writing them. \
+If the user mentions in passing that something is already done, a date should move, a task \
+needs a note, a priority or project should change, or something new should be tracked, do NOT \
+call any write tool yet (done_task, set_due, add_note, reprioritize_task, reproject_task, \
+rename_task, create_task, add_subtask, ...). Record it in a running pending-changes list \
+kept in the conversation, and acknowledge it in a few words.
+   - Refer to tasks by partial name, not slug: rename, reprioritize and reproject change a \
+task's slug, so a slug captured earlier may be stale by commit time.
+   - Coalesce as you go: the latest value wins per field on a task (two due dates become \
+one). A done supersedes earlier due/priority edits on the same task but keeps its notes. \
+For a recurring task, done only advances its cycle, so say that in the summary.
+   - Overlay the pending list on anything you surface. list_tasks still shows the stored \
+state, so do not suggest a task the user already called done, and show moved dates as moved.
+   - Restate the pending list briefly when it grows, or when the user switches category, so \
+it survives a long conversation.
 
 5. Where useful, check recency (sort=recent / updated_within_days) within the selected \
 category so a stale-looking task doesn't get silently skipped.
+
+6. Commit when the user marks the session done ("done", "wrap up", "that's it"). Show the \
+coalesced pending list and ask once for confirmation, letting them drop or edit items. On \
+confirmation, apply it as ordinary tool calls:
+   - Create new tasks first, then apply edits to existing ones, and apply any rename last \
+for each task.
+   - Do not roll back and do not stop on a failure. Skip only changes that depended on the \
+failed one (for example a note for a task whose create_task failed), and keep going.
+   - Finish with a short succeeded / failed list, and offer to retry the failures.
+   If the user signals they are leaving (thanks, bye, going quiet) while changes are still \
+pending, ask whether to commit them before they go. With nothing pending, there is nothing to \
+do. Uncommitted changes are lost when the conversation ends, and the evening dump reads \
+Toledo's stored state.
 """
 
 PERIODIC_AUDIT_PROMPT = """\
 You are running Toledo's periodic audit and goals refinement (roughly every 3–6 months). \
-This is a structural review, not daily triage — day-to-day drift is already handled live by \
-the morning planning prompt. Follow this sequence:
+This is a structural review, not daily triage — day-to-day drift is already handled by the \
+morning planning prompt, which commits its changes at the end of each session. Follow this sequence:
 
 1. Call list_tasks (state=all) and review for staleness: tasks that no longer matter, \
 duplicates, or things quietly superseded. Confirm with the user before archiving (move_task \
@@ -1290,7 +1314,7 @@ structure rather than daily narrative. Create tasks via create_task for anything
 
 5. Sanity-check the goals category (quarter-level overarching targets): does it exist, is it \
 stale, does it need updating? If no goals project/category exists yet, offer to create one. \
-Live week-to-week goal adjustments happen in the morning planning prompt, not here — this is \
+Week-to-week goal adjustments happen in the morning planning prompt, not here — this is \
 just a staleness check.
 
 6. Before finishing, make sure a recurring Toledo task exists that reminds the user to re-run \
@@ -1315,8 +1339,8 @@ async def list_prompts() -> list[types.Prompt]:
             name="morning_planning",
             description=(
                 "Morning 'what should I work on' session: pick a category, surface "
-                "urgency-weighted tasks in it, and write back live as things come up in "
-                "conversation."
+                "urgency-weighted tasks in it, and hold changes that come up in "
+                "conversation, committing them together once you mark the session done."
             ),
         ),
         types.Prompt(
