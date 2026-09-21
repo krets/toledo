@@ -250,7 +250,28 @@ def err(text: str) -> list[types.TextContent]:
 
 # ── MCP Server ────────────────────────────────────────────────────────────────
 
-server = Server("toledo")
+# Sent to the client on connect. Keep it short: it lands in the model's context
+# every session, and the prompts themselves are fetched on demand.
+SERVER_INSTRUCTIONS = """\
+Toledo is the user's task manager. Tasks are addressed by partial name or slug.
+
+Toledo ships guided-session prompts:
+- morning_planning: start-of-day "what should I work on" session
+- end_of_day_dump: end-of-day brain dump reconciled against tasks and the glossary
+- periodic_audit: infrequent deep audit of tasks, categories, and goals
+
+When the user asks for one of these sessions (e.g. "let's plan my day", "end of day \
+dump"), fetch its full instructions first and follow them.
+
+Claude.ai's web interface does not support MCP prompts natively, so fetch them with \
+the get_prompt tool (name = the prompt name; list_prompts shows what exists). Clients \
+that do surface MCP prompts can use them directly.
+
+Resources (status, projects, active tasks, glossary) are likewise available through \
+the list_resources and get_resource tools.
+"""
+
+server = Server("toledo", instructions=SERVER_INSTRUCTIONS)
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 
