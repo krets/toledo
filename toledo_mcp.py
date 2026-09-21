@@ -233,6 +233,13 @@ def resolve_task(partial: str):
     return r
 
 
+def _append_note(folder: Path, note: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(folder / "worklog.md", "a") as f:
+        f.write(f"\n### {ts}\n{note}\n")
+    t.append_log(folder, "note_added")
+
+
 def ok(text: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=text)]
 
@@ -303,12 +310,14 @@ async def list_tools() -> list[types.Tool]:
             name="done_task",
             description=(
                 "Mark a task as completed. "
-                "For recurring tasks this advances the due date instead of completing it."
+                "For recurring tasks this advances the due date instead of completing it. "
+                "Optionally logs a closing note to the task's worklog."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "Partial task name or slug"},
+                    "note": {"type": "string", "description": "Optional closing note to add to the worklog"},
                 },
                 "required": ["task"],
             },
@@ -379,9 +388,9 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "task": {"type": "string"},
-                    "date": {"type": "string", "description": "YYYY-MM-DD, or empty string to clear"},
+                    "due":  {"type": "string", "description": "YYYY-MM-DD, or empty string to clear"},
                 },
-                "required": ["task", "date"],
+                "required": ["task", "due"],
             },
         ),
         types.Tool(
@@ -606,10 +615,53 @@ async def list_tools() -> list[types.Tool]:
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
 
-@server.call_tool()
+# Argument names agents commonly guess, mapped to the canonical schema name.
+# Applied only when the canonical key is absent, so real params (e.g. the
+# 'due' on create_task/add_subtask) are never overridden.
+_ARG_ALIASES_ALL = {
+    "task_id": "task", "task_name": "task", "slug": "task", "id": "task",
+}
+_ARG_ALIASES = {
+    "create_task": {"title": "name"},
+    "rename_task": {"new_name": "name", "title": "name"},
+    "add_subtask": {"title": "name"},
+    "set_due":     {"date": "due", "due_date": "due"},
+    "add_note":    {"text": "note", "content": "note"},
+}
+
+_required_args: dict[str, list[str]] | None = None
+
+
+async def _required_for(name: str) -> list[str]:
+    global _required_args
+    if _required_args is None:
+        _required_args = {
+            tool.name: tool.inputSchema.get("required", []) for tool in await list_tools()
+        }
+    return _required_args.get(name, [])
+
+
+def _normalize_args(name: str, args: dict) -> dict:
+    out = dict(args)
+    aliases = {**_ARG_ALIASES_ALL, **_ARG_ALIASES.get(name, {})}
+    for alias, canonical in aliases.items():
+        if alias in out and canonical not in out:
+            out[canonical] = out.pop(alias)
+    return out
+
+
+# validate_input=False: the library's schema check would reject aliased names
+# before we could normalize them, so required args are checked in call_tool.
+@server.call_tool(validate_input=False)
 async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
-    args = arguments or {}
+    args = _normalize_args(name, arguments or {})
     try:
+        missing = [k for k in await _required_for(name) if k not in args]
+        if missing:
+            raise ValueError(
+                f"Missing required argument(s) for '{name}': {', '.join(missing)}. "
+                f"Got: {', '.join(sorted(args)) or '(none)'}"
+            )
         return await _dispatch(name, args)
     except ValueError as e:
         return err(str(e))
@@ -683,6 +735,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     # ── done_task ─────────────────────────────────────────────────────────────
     if name == "done_task":
         folder, state = resolve_task(args["task"])
+        closing_note = (args.get("note") or "").strip()
         rf = folder / "recurrence.txt"
         if rf.exists():
             # Recurring: advance due date
@@ -695,6 +748,8 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             next_due = (from_date + timedelta(days=period)).strftime("%Y-%m-%d")
             df.write_text(next_due)
             t.append_log(folder, "done_recurring", next_due=next_due)
+            if closing_note:
+                _append_note(folder, closing_note)
             return ok(f"↻ Recurring task advanced. Next due: {next_due}")
         else:
             dst = t.get_tasks_dir() / "completed" / folder.name
@@ -703,6 +758,8 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             if t.get_context() == folder.name:
                 t.set_context("")
             t.append_log(dst, "completed")
+            if closing_note:
+                _append_note(dst, closing_note)
             return ok(f"✓ Completed: {folder.name}")
 
     # ── move_task ─────────────────────────────────────────────────────────────
@@ -782,7 +839,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     # ── set_due ───────────────────────────────────────────────────────────────
     if name == "set_due":
         folder, _ = resolve_task(args["task"])
-        date = (args.get("date") or "").strip()
+        date = (args.get("due") or "").strip()
         df = folder / "due.txt"
         if date:
             df.write_text(date)
@@ -817,12 +874,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         note = args["note"].strip()
         if not note:
             raise ValueError("note text is required")
-        wf = folder / "worklog.md"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        entry = f"\n### {ts}\n{note}\n"
-        with open(wf, "a") as f:
-            f.write(entry)
-        t.append_log(folder, "note_added")
+        _append_note(folder, note)
         return ok(f"Note added to {folder.name}")
 
     # ── update_description ────────────────────────────────────────────────────
