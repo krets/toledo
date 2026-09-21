@@ -655,7 +655,7 @@ You can ask the Toledo AI to perform the following actions. When responding, pro
 - **Create Task**: `create_task(name, project="GEN", priority=50, due="YYYY-MM-DD", recur=0)`
 - **Complete Task**: `done_task(task_slug_or_name)`
 - **Add Note**: `add_note(task, text)`
-- **Set Due Date**: `set_due(task, date="YYYY-MM-DD")`
+- **Set Due Date**: `set_due(task, due="YYYY-MM-DD")`
 - **Change Priority**: `reprioritize(task, priority)`
 - **Change Project**: `reproject(task, project_code)`
 - **Edit Description**: `edit_desc(task, text)`
@@ -734,9 +734,9 @@ CHATTABLE_TOOLS = [
                 "type": "object",
                 "properties": {
                     "task": {"type": "string"},
-                    "date": {"type": "string", "description": "YYYY-MM-DD"}
+                    "due": {"type": "string", "description": "YYYY-MM-DD"}
                 },
-                "required": ["task", "date"]
+                "required": ["task", "due"]
             }
         }
     },
@@ -851,9 +851,11 @@ def execute_chat_tool(name, args):
             r = t.find_task(args["task"])
             if not r: return f"Error: Task {args['task']} not found"
             folder, _ = r
-            (folder / "due.txt").write_text(args["date"])
-            t.append_log(folder, "due_date_set", date=args["date"], source="chat")
-            return f"Success: Set due date for {folder.name} to {args['date']}"
+            due = args.get("due") or args.get("date")  # 'date' kept as a legacy alias
+            if not due: return "Error: due is required (YYYY-MM-DD)"
+            (folder / "due.txt").write_text(due)
+            t.append_log(folder, "due_date_set", date=due, source="chat")
+            return f"Success: Set due date for {folder.name} to {due}"
 
         if name == "update_description":
             r = t.find_task(args["task"])
