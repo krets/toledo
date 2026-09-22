@@ -425,6 +425,26 @@ def task_subundo(slug):
     return jsonify({"ok": True})
 
 
+@app.route("/api/tasks/<slug>/sub/<sub_slug>", methods=["DELETE"])
+def task_subdelete(slug, sub_slug):
+    r = t.find_task(slug)
+    if not r:
+        return jsonify({"error": "Not found"}), 404
+    folder, _ = r
+    # Match against directory listings rather than joining the URL segment into
+    # a path, so a segment like ".." can never point rmtree outside the subtask.
+    for ss in t.SUBTASK_STATES:
+        sd = folder / "subtasks" / ss
+        if not sd.exists():
+            continue
+        for sub in sd.iterdir():
+            if sub.is_dir() and sub.name == sub_slug:
+                shutil.rmtree(sub)
+                t.append_log(folder, "subtask_deleted", subtask=sub_slug, state=ss)
+                return jsonify({"deleted": True})
+    return jsonify({"error": "Subtask not found"}), 404
+
+
 @app.route("/api/tasks/<slug>/rename", methods=["POST"])
 def task_rename(slug):
     r = t.find_task(slug)
@@ -664,6 +684,7 @@ You can ask the Toledo AI to perform the following actions. When responding, pro
 - **Complete Subtask**: `done_subtask(parent_task, subtask_slug)`
 - **Undo Subtask**: `undo_subtask(parent_task, subtask_slug)`
 - **Rename Subtask**: `rename_subtask(parent_task, subtask_slug, new_name)`
+- **Delete Subtask**: `delete_subtask(parent_task, subtask_slug)`
 - **Move Task State**: `move_task(task, state="active|completed|archive")`
 - **Cancel Recurrence**: `cancel_recurrence(task)`
 - **Archive Task**: `archive_task(task)`
@@ -777,6 +798,21 @@ CHATTABLE_TOOLS = [
         "function": {
             "name": "done_subtask",
             "description": "Mark a subtask as completed",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Parent task name/slug"},
+                    "subtask": {"type": "string", "description": "Subtask name or slug"}
+                },
+                "required": ["task", "subtask"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_subtask",
+            "description": "Permanently delete a subtask (active or completed). Cannot be undone.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -907,6 +943,31 @@ def execute_chat_tool(name, args):
             match.rename(dst)
             t.append_log(folder, "subtask_completed", subtask=match.name, source="chat")
             return f"Success: Subtask {match.name} marked complete"
+
+        if name == "delete_subtask":
+            r = t.find_task(args["task"])
+            if not r: return f"Error: Parent task {args['task']} not found"
+            folder, _ = r
+            partial = args["subtask"].strip().lower()
+            if not partial: return "Error: subtask is required"
+            candidates = [
+                (ss, sub)
+                for ss in t.SUBTASK_STATES
+                if (folder / "subtasks" / ss).exists()
+                for sub in sorted((folder / "subtasks" / ss).iterdir())
+                if sub.is_dir()
+            ]
+            matches = [c for c in candidates if c[1].name.lower() == partial]
+            if not matches:
+                matches = [c for c in candidates if partial in c[1].name.lower()]
+            if not matches: return f"Error: Subtask {partial} not found"
+            if len(matches) > 1:
+                names = ", ".join(f"{sub.name} ({ss})" for ss, sub in matches)
+                return f"Error: '{partial}' is ambiguous — matches: {names}"
+            ss, sub = matches[0]
+            shutil.rmtree(sub)
+            t.append_log(folder, "subtask_deleted", subtask=sub.name, state=ss, source="chat")
+            return f"Success: Deleted subtask {sub.name} ({ss})"
 
         if name == "move_task":
             r = t.find_task(args["task"])

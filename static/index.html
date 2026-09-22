@@ -281,6 +281,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .sub-name.done{text-decoration:line-through;color:var(--muted)}
 .sub-rename{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:3px 5px;border-radius:4px;opacity:0;transition:opacity .15s;line-height:1}
 .sub-item:hover .sub-rename{opacity:1}
+.sub-delete{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:3px 5px;border-radius:4px;opacity:0;transition:opacity .15s;line-height:1}
+.sub-delete:hover{color:var(--danger)}
+.sub-item:hover .sub-delete{opacity:1}
 .wlog-entry{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)}
 .wlog-entry:last-child{border-bottom:none;margin-bottom:0}
 .wlog-ts{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:500}
@@ -1114,6 +1117,7 @@ App.renderPanel = function() {
           title="${s.done ? 'Mark incomplete' : 'Mark done'}"></button>
         <span class="sub-name${s.done ? ' done' : ''}">${esc(s.name)}</span>
         <button class="sub-rename" onclick='App.openSubRename(${JSON.stringify(s.slug)},${JSON.stringify(s.name)})' title="Rename">✎</button>
+        <button class="sub-delete" onclick='App.deleteSubtask(${JSON.stringify(s.slug)},${JSON.stringify(s.name)})' title="Delete">🗑</button>
       </div>`).join('');
   body += `<div class="psec">
     <div class="psec-head">
@@ -1215,6 +1219,16 @@ App.undoSubtask = async function(subSlug) {
     App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
     App.renderPanel();
     App.toast('↩ Subtask reopened');
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.deleteSubtask = async function(subSlug, subName) {
+  if (!App.task || !confirm(`Delete subtask "${subName}"? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.slug)}/sub/${encodeURIComponent(subSlug)}`);
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.renderPanel();
+    App.toast('🗑 Subtask deleted');
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 

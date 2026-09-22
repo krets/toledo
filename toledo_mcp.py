@@ -480,6 +480,21 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="delete_subtask",
+            description=(
+                "Permanently delete a subtask (active or completed). Cannot be undone. "
+                "Fails if the name matches more than one subtask."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task":    {"type": "string", "description": "Parent task"},
+                    "subtask": {"type": "string", "description": "Partial subtask name or slug"},
+                },
+                "required": ["task", "subtask"],
+            },
+        ),
+        types.Tool(
             name="search_tasks",
             description="Search tasks by keyword across names, descriptions, and notes.",
             inputSchema={
@@ -955,6 +970,33 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         match.rename(dst)
         t.append_log(folder, "subtask_completed", subtask=match.name)
         return ok(f"✓ Subtask done: {match.name}")
+
+    # ── delete_subtask ────────────────────────────────────────────────────────
+    if name == "delete_subtask":
+        import shutil
+        folder, _ = resolve_task(args["task"])
+        partial   = args["subtask"].strip().lower()
+        if not partial:
+            raise ValueError("subtask is required")
+        candidates = [
+            (ss, sub)
+            for ss in t.SUBTASK_STATES
+            if (folder / "subtasks" / ss).exists()
+            for sub in sorted((folder / "subtasks" / ss).iterdir())
+            if sub.is_dir()
+        ]
+        matches = [c for c in candidates if c[1].name.lower() == partial]
+        if not matches:
+            matches = [c for c in candidates if partial in c[1].name.lower()]
+        if not matches:
+            raise ValueError(f"No subtask matching '{partial}'")
+        if len(matches) > 1:
+            names = ", ".join(f"{sub.name} ({ss})" for ss, sub in matches)
+            raise ValueError(f"'{partial}' is ambiguous — matches: {names}")
+        ss, sub = matches[0]
+        shutil.rmtree(sub)
+        t.append_log(folder, "subtask_deleted", subtask=sub.name, state=ss)
+        return ok(f"🗑 Deleted subtask: {sub.name} ({ss})")
 
     # ── search_tasks ──────────────────────────────────────────────────────────
     if name == "search_tasks":

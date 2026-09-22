@@ -550,6 +550,37 @@ def cmd_subdone(args):
     print(f"✓ Subtask '{sub.name}' marked complete")
 
 
+def cmd_subrm(args):
+    ctx = get_context()
+    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
+    r = find_task(ctx)
+    if not r: print(f"✗ Context task '{ctx}' not found."); return
+    task_folder, _ = r
+    query = args.name.lower()
+    candidates = [
+        (ss, f)
+        for ss in SUBTASK_STATES
+        if (task_folder / "subtasks" / ss).exists()
+        for f in sorted((task_folder / "subtasks" / ss).iterdir())
+        if f.is_dir()
+    ]
+    matches = [c for c in candidates if c[1].name.lower() == query]
+    if not matches:
+        matches = [c for c in candidates if query in c[1].name.lower()]
+    if not matches:
+        print(f"✗ No subtask matching '{args.name}'."); return
+    if len(matches) > 1:
+        print(f"✗ Ambiguous — matches: {', '.join(f'{f.name} ({ss})' for ss, f in matches)}"); return
+    ss, sub = matches[0]
+    answer = input(f"Delete subtask '{sub.name}' ({ss}) permanently? [y/N] ")
+    if answer.strip().lower() != "y":
+        print("Aborted."); return
+    import shutil
+    shutil.rmtree(sub)
+    append_log(task_folder, "subtask_deleted", subtask=sub.name, state=ss)
+    print(f"✓ Deleted subtask '{sub.name}'")
+
+
 def cmd_upcoming(args):
     days = getattr(args, "days", 7)
     today = datetime.now().date()
@@ -900,6 +931,9 @@ def main():
     psd = s.add_parser("subdone", help="Complete subtask")
     psd.add_argument("name")
 
+    psrm = s.add_parser("subrm", help="Delete subtask")
+    psrm.add_argument("name")
+
     pup = s.add_parser("upcoming", aliases=["today"], help="Upcoming tasks")
     pup.add_argument("--days", type=int, default=7)
 
@@ -963,7 +997,7 @@ def main():
         "note": cmd_note, "edit": cmd_edit,
         "due": cmd_due, "proj": cmd_proj,
         "show": cmd_show, "search": cmd_search,
-        "subdone": cmd_subdone,
+        "subdone": cmd_subdone, "subrm": cmd_subrm,
         "upcoming": cmd_upcoming, "today": cmd_upcoming,
         "archive": cmd_archive, "rm": cmd_rm,
         "reprioritize": cmd_reprioritize, "pri": cmd_reprioritize,
