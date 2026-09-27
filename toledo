@@ -1,81 +1,442 @@
 #!/usr/bin/env python3
 """
-Toledo - A file-based task manager CLI
+Toledo - task manager CLI, a thin client over the Toledo MCP server.
 
-DEPRECATED: task data now lives in SQLite (see toledo_db.py) and is served by
-toledo_server.py / toledo_mcp.py. Commands that read or write the legacy file
-tree are disabled; only chat, config and export remain.
+Config:  ~/.toledo/config.json   (mcp.url, mcp.headers, context, ...)
 
-Config:  ~/.toledo/config.json
-Tasks:   ~/.toledo/tasks/            (default)
-Context: ~/.toledo/.context
+The first command run without an MCP URL configured starts a setup wizard;
+run it again any time with `toledo setup`.
 
 Usage examples:
-    toledo init
+    toledo ls
     toledo new "Fix login bug" -p 10 -c WEB --due 2026-04-15
-    toledo config remote.url http://your-server:8000
+    toledo ctx "login bug"; toledo note "Reproduced on staging"
+    toledo call set_recurrence task="login bug" interval=7
 """
 
 import argparse
+import asyncio
 import json
-import re
-from datetime import datetime, timedelta
+import sys
 from pathlib import Path
 
-CONFIG_PATH_OLD = Path.home() / ".toledo.json"
 CONFIG_PATH = Path.home() / ".toledo" / "config.json"
-DEFAULT_TASKS_DIR = Path.home() / ".toledo" / "tasks"
-CONTEXT_FILE = Path.home() / ".toledo" / ".context"
-
+DEFAULT_MCP_URL = "http://localhost:8001/mcp/sse"
 STATES = ["active", "completed", "archive"]
-SUBTASK_STATES = ["active", "completed"]
-# Commands that don't touch the legacy file tree as the store (export reads it
-# for a pre-migration backup).
-LIVE_COMMANDS = {"chat", "config", "export"}
 
 
-# ── Config & helpers ──────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
 def load_config():
-    # Migration: Move old config to new location if it exists
-    if CONFIG_PATH_OLD.exists() and not CONFIG_PATH.exists():
-        ensure_dir(CONFIG_PATH.parent)
-        CONFIG_PATH_OLD.rename(CONFIG_PATH)
-        print(f"ℹ Migrated config to {CONFIG_PATH}")
-
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            return json.load(f)
-    return {"tasks_dir": str(DEFAULT_TASKS_DIR)}
+        return json.loads(CONFIG_PATH.read_text())
+    return {}
 
 def save_config(config):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(config, indent=2))
 
-def get_tasks_dir():
-    return Path(load_config().get("tasks_dir", DEFAULT_TASKS_DIR))
+def get_context():
+    return load_config().get("context")
 
-def ensure_dir(path):
-    path.mkdir(parents=True, exist_ok=True)
+def set_context(ref):
+    config = load_config()
+    if ref:
+        config["context"] = ref
+    else:
+        config.pop("context", None)
+    save_config(config)
 
-def init_tasks_dir():
-    for state in STATES:
-        ensure_dir(get_tasks_dir() / state)
-    ensure_dir(Path.home() / ".toledo")
+def fail(msg, code=1):
+    print(f"✗ {msg}", file=sys.stderr)
+    raise SystemExit(code)
 
-def load_projects():
-    pf = get_tasks_dir() / "projects.json"
-    if not pf.exists():
+
+# ── MCP client ────────────────────────────────────────────────────────────────
+
+class McpError(Exception):
+    pass
+
+
+def _leaf(exc):
+    """The innermost real error inside anyio's exception groups."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return exc
+
+
+async def _with_session(url, headers, fn):
+    import httpx
+    import logging
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    # The client library logs warnings (e.g. unknown tool) that duplicate the
+    # error the CLI already prints.
+    for name in ("mcp", "client"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+    timeout = httpx.Timeout(30, read=300)
+    async with httpx.AsyncClient(headers=headers, timeout=timeout) as http:
+        async with streamable_http_client(url, http_client=http) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await fn(session)
+
+
+def run_session(fn, url=None, headers=None):
+    mcp_cfg = load_config().get("mcp", {})
+    url = url or mcp_cfg.get("url")
+    headers = headers if headers is not None else mcp_cfg.get("headers", {})
+    try:
+        return asyncio.run(_with_session(url, headers, fn))
+    except Exception as e:
+        e = _leaf(e)
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (401, 403):
+            raise McpError(f"{url} rejected the credentials (HTTP {status}); run `toledo setup`")
+        raise McpError(f"Could not reach MCP server at {url}: {e}") from None
+
+
+def call_tool(tool, /, **args):
+    """Call a tool and return its text. Tool-level errors exit non-zero."""
+    args = {k: v for k, v in args.items() if v is not None}
+
+    async def go(session):
+        return await session.call_tool(tool, args)
+
+    ensure_mcp()
+    try:
+        result = run_session(go)
+    except McpError as e:
+        fail(str(e))
+    text = "\n".join(c.text for c in result.content if getattr(c, "type", "") == "text")
+    if result.isError or text.startswith("Error:"):
+        fail(text.removeprefix("Error:").strip())
+    return text
+
+
+def out(tool, /, **args):
+    print(call_tool(tool, **args))
+
+
+# ── Setup wizard ──────────────────────────────────────────────────────────────
+
+def probe(url, headers):
+    """POST an MCP initialize; return the HTTP status (0 if unreachable)."""
+    import httpx
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                       "clientInfo": {"name": "toledo-cli", "version": "1"}}}
+    try:
+        r = httpx.post(url, json=body, timeout=10, headers={
+            **headers, "Accept": "application/json, text/event-stream"})
+        return r.status_code
+    except httpx.HTTPError:
+        return 0
+
+
+def ask(prompt, default=None):
+    suffix = f" [{default}]" if default else ""
+    answer = input(f"{prompt}{suffix}: ").strip()
+    return answer or (default or "")
+
+
+def ask_auth():
+    print("The server needs authentication. How should the CLI send it?")
+    print("  1) Bearer token (Authorization: Bearer ...)")
+    print("  2) access_token cookie")
+    print("  3) Custom header")
+    choice = ask("Choice", "1")
+    if choice == "3":
+        name = ask("Header name")
+        return {name: ask(f"{name} value")} if name else {}
+    token = ask("Token")
+    if not token:
         return {}
-    data = json.loads(pf.read_text())
-    # Migrate old string format {"CODE": "name"} to {"CODE": {"name": ..., "color": ...}}
-    migrated = False
-    for code, val in list(data.items()):
-        if isinstance(val, str):
-            data[code] = {"name": val, "color": ""}
-            migrated = True
-    if migrated:
-        save_projects(data)
-    return data
+    if choice == "2":
+        return {"Cookie": f"access_token={token}"}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def wizard():
+    print("Toledo setup — connect the CLI to your Toledo MCP server.\n")
+    config = load_config()
+    current = config.get("mcp", {})
+    url = ask("MCP server URL", current.get("url") or DEFAULT_MCP_URL)
+    headers = dict(current.get("headers", {}))
+
+    while True:
+        status = probe(url, headers)
+        if status in (401, 403):
+            if headers:
+                print(f"✗ {url} rejected those credentials (HTTP {status}).")
+            new_headers = ask_auth()
+            if new_headers:
+                headers = new_headers
+                continue
+            print("✗ No credentials given.")
+        elif status == 0:
+            print(f"✗ Could not connect to {url}.")
+        elif status >= 400:
+            print(f"✗ {url} answered HTTP {status}; is this the MCP endpoint (usually …/mcp/sse)?")
+        else:
+            try:
+                tools = run_session(lambda s: s.list_tools(), url=url, headers=headers).tools
+                print(f"✓ Connected: {len(tools)} tools available.")
+                break
+            except McpError as e:
+                print(f"✗ {e}")
+        if ask("Try a different URL? (y/n)", "y").lower().startswith("y"):
+            url = ask("MCP server URL", url)
+            continue
+        if not ask("Save these settings anyway? (y/n)", "n").lower().startswith("y"):
+            fail("Setup cancelled; nothing saved.")
+        break
+
+    config["mcp"] = {"url": url, "headers": headers}
+    save_config(config)
+    print(f"✓ Saved to {CONFIG_PATH}")
+
+
+def ensure_mcp():
+    if load_config().get("mcp", {}).get("url"):
+        return
+    if not sys.stdin.isatty():
+        fail("No MCP server configured. Run `toledo setup` or `toledo config mcp.url <url>`.")
+    wizard()
+    print()
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+def task_or_ctx(args):
+    ref = getattr(args, "task", None) or get_context()
+    if not ref:
+        fail("No task given and no context set. Pass -t TASK or run `toledo ctx TASK`.")
+    return ref
+
+
+def cmd_setup(args):
+    wizard()
+
+
+def cmd_status(args):
+    out("list_tasks", state="all" if args.all else (args.state or "active"),
+        project=args.project, sort="recent" if args.recent else None,
+        updated_within_days=args.days)
+
+
+def cmd_show(args):
+    out("get_task", task=task_or_ctx(args))
+
+
+def cmd_new(args):
+    out("create_task", name=args.name, project=args.project, priority=args.priority,
+        due=args.due, recurrence=args.recur, description=args.description)
+
+
+def cmd_done(args):
+    out("done_task", task=args.task, note=args.note)
+
+
+def cmd_move(args):
+    out("move_task", task=args.task, state=args.to)
+
+
+def cmd_archive(args):
+    out("move_task", task=args.task, state="archive")
+
+
+def cmd_cancel(args):
+    print(call_tool("set_recurrence", task=args.task, interval=0))
+    out("done_task", task=args.task)
+
+
+def cmd_rm(args):
+    if not args.yes:
+        answer = input(f"Delete task matching '{args.task}' permanently? [y/N] ")
+        if answer.strip().lower() != "y":
+            print("Aborted."); return
+    out("delete_task", task=args.task)
+
+
+def cmd_rename(args):
+    out("rename_task", task=args.task, name=args.name)
+
+
+def cmd_reprioritize(args):
+    out("reprioritize_task", task=args.task, priority=args.priority)
+
+
+def cmd_reproject(args):
+    out("reproject_task", task=args.task, project=args.project)
+
+
+def cmd_due(args):
+    out("set_due", task=task_or_ctx(args), due=args.date)
+
+
+def cmd_recur(args):
+    out("set_recurrence", task=task_or_ctx(args), interval=args.days)
+
+
+def cmd_note(args):
+    out("add_note", task=task_or_ctx(args), note=args.text)
+
+
+def cmd_edit(args):
+    out("update_description", task=task_or_ctx(args), description=args.text)
+
+
+def cmd_sub(args):
+    out("add_subtask", task=task_or_ctx(args), name=args.name,
+        priority=args.priority, due=args.due)
+
+
+def cmd_subdone(args):
+    out("done_subtask", task=task_or_ctx(args), subtask=args.name)
+
+
+def cmd_subrm(args):
+    if not args.yes:
+        answer = input(f"Delete subtask matching '{args.name}' permanently? [y/N] ")
+        if answer.strip().lower() != "y":
+            print("Aborted."); return
+    out("delete_subtask", task=task_or_ctx(args), subtask=args.name)
+
+
+def cmd_search(args):
+    out("search_tasks", query=args.query)
+
+
+def cmd_upcoming(args):
+    out("upcoming_tasks", days=args.days)
+
+
+def cmd_ctx(args):
+    ref = args.task
+    if ref == "clear":
+        set_context(None); print("✓ Context cleared."); return
+    if ref == "show":
+        ctx = get_context()
+        print(f"Context: {ctx}" if ctx else "No context set."); return
+    # Resolve through the server so the context is the task's slug.
+    detail = call_tool("get_task", task=ref)
+    slug = next((ln.split(":", 1)[1].strip() for ln in detail.splitlines()
+                 if ln.startswith("Slug:")), ref)
+    set_context(slug)
+    print(f"✓ Context → '{slug}'")
+
+
+def cmd_proj(args):
+    if args.remove:
+        out("remove_project", code=args.remove)
+    elif args.rename:
+        out("rename_project", old_code=args.rename[0], new_code=args.rename[1])
+    elif args.merge:
+        out("merge_projects", from_code=args.merge[0], into_code=args.merge[1])
+    elif args.code and args.name:
+        out("add_project", code=args.code, name=args.name, color=args.color)
+    else:
+        out("list_projects")
+
+
+def cmd_glossary(args):
+    if args.term and args.canonical:
+        out("update_glossary", term=args.term, canonical=args.canonical)
+    elif args.term:
+        fail("Give both TERM and CANONICAL to add an entry.")
+    else:
+        out("get_resource", uri="toledo://glossary")
+
+
+def cmd_prompt(args):
+    if args.name:
+        out("get_prompt", name=args.name)
+    else:
+        out("list_prompts")
+
+
+def cmd_tools(args):
+    ensure_mcp()
+    try:
+        tools = run_session(lambda s: s.list_tools()).tools
+    except McpError as e:
+        fail(str(e))
+    for t in tools:
+        params = ", ".join(
+            p + ("" if p in t.inputSchema.get("required", []) else "?")
+            for p in t.inputSchema.get("properties", {})
+        )
+        print(f"{t.name}({params})")
+        if args.verbose and t.description:
+            print(f"    {t.description}")
+
+
+def cmd_call(args):
+    params = {}
+    for pair in args.params:
+        key, sep, value = pair.partition("=")
+        if not sep:
+            fail(f"Expected key=value, got '{pair}'")
+        try:
+            params[key] = json.loads(value)
+        except json.JSONDecodeError:
+            params[key] = value
+    out(args.tool, **params)
+
+
+def cmd_config(args):
+    config = load_config()
+    if not args.key:
+        print(json.dumps(config, indent=2))
+        return
+
+    parts = args.key.split(".")
+
+    if args.value is None and not args.unset:
+        val = config
+        for p in parts:
+            if isinstance(val, dict) and p in val:
+                val = val[p]
+            else:
+                val = None; break
+        if val is not None:
+            print(val if not isinstance(val, (dict, list)) else json.dumps(val))
+        return
+
+    if args.unset:
+        val = config
+        for p in parts[:-1]:
+            if p in val and isinstance(val[p], dict):
+                val = val[p]
+            else:
+                return
+        if parts[-1] in val:
+            del val[parts[-1]]
+            save_config(config)
+            print(f"✓ Unset {args.key}")
+        return
+
+    val = config
+    for p in parts[:-1]:
+        if p not in val or not isinstance(val[p], dict):
+            val[p] = {}
+        val = val[p]
+
+    new_val = args.value
+    # Try to parse as JSON for bools/ints/etc, fallback to string
+    try:
+        new_val = json.loads(args.value)
+    except json.JSONDecodeError:
+        pass
+
+    val[parts[-1]] = new_val
+    save_config(config)
+    print(f"✓ {args.key} = {new_val}")
+
+
+# ── Chat (talks to the web server's /api/chat, not the MCP server) ────────────
 
 class Spinner:
     def __init__(self, message="Thinking..."):
@@ -85,7 +446,6 @@ class Spinner:
 
     def _spin(self):
         import time
-        import sys
         chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         i = 0
         while not self.stop_running:
@@ -108,733 +468,15 @@ class Spinner:
         if self.thread:
             self.thread.join()
 
-def save_projects(p):
-    pf = get_tasks_dir() / "projects.json"
-    pf.write_text(json.dumps(p, indent=2))
-
-def load_glossary():
-    gf = get_tasks_dir() / "glossary.json"
-    if not gf.exists():
-        return {}
-    return json.loads(gf.read_text())
-
-def save_glossary(g):
-    gf = get_tasks_dir() / "glossary.json"
-    gf.write_text(json.dumps(g, indent=2))
-
-def proj_display_name(projects, code):
-    """Return the display name for a project code."""
-    val = projects.get(code)
-    if isinstance(val, dict):
-        return val.get("name", code)
-    return str(val) if val else code
-
-def make_task_slug(priority, project_code, name):
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return f"{priority:02d}-{project_code.upper()}-{slug}"
-
-def parse_task_slug(slug):
-    parts = slug.split("-", 2)
-    if len(parts) < 3:
-        return {"priority": 0, "project": "??", "name": slug}
-    return {
-        "priority": int(parts[0]) if parts[0].isdigit() else 0,
-        "project": parts[1],
-        "name": parts[2].replace("-", " "),
-    }
-
-def find_task(partial):
-    for state in STATES:
-        sd = get_tasks_dir() / state
-        if not sd.exists():
-            continue
-        for folder in sd.iterdir():
-            if folder.is_dir() and partial.lower() in folder.name.lower():
-                return folder, state
-    return None
-
-def append_log(task_folder, action, **kwargs):
-    entry = {"ts": datetime.now().isoformat(), "action": action, **kwargs}
-    with open(task_folder / "activity.log", "a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-def get_context():
-    return CONTEXT_FILE.read_text().strip() if CONTEXT_FILE.exists() else None
-
-def set_context(slug):
-    ensure_dir(CONTEXT_FILE.parent)
-    CONTEXT_FILE.write_text(slug)
-
-def clear_context():
-    if CONTEXT_FILE.exists():
-        CONTEXT_FILE.unlink()
-
-
-# ── Remote Client ─────────────────────────────────────────────────────────────
-
-def get_remote_url():
-    config = load_config()
-    url = config.get("remote", {}).get("url")
-    if url:
-        return url.rstrip("/")
-    return None
-
-def remote_request(method, path, **kwargs):
-    import requests
-    url = f"{get_remote_url() or 'http://localhost:8000'}{path}"
-    # Use remote.api_key if set for future-proofing
-    config = load_config()
-    api_key = config.get("remote", {}).get("api_key")
-    headers = kwargs.get("headers", {})
-    if api_key:
-        headers["X-API-Key"] = api_key
-    
-    try:
-        r = requests.request(method, url, headers=headers, **kwargs)
-        if r.status_code >= 400:
-            try:    err = r.json().get("error", r.text)
-            except: err = r.text
-            print(f"✗ Remote Error ({r.status_code}): {err}")
-            return None
-        return r.json()
-    except Exception as e:
-        print(f"✗ Connection Error: {e}")
-        return None
-
-def cmd_remote_status(args):
-    params = {}
-    if args.project: params["project"] = args.project
-    if args.all: params["all"] = "true"
-    
-    tasks = remote_request("GET", "/api/tasks", params=params)
-    if tasks is None: return
-    
-    print(f"# Toledo Task Status (Remote: {get_remote_url() or 'http://localhost:8000'})\n")
-    
-    states = ["active", "completed"]
-    if args.all: states.append("archive")
-    
-    for state in states:
-        st_tasks = [t for t in tasks if t["state"] == state]
-        if not st_tasks: continue
-        print(f"## {state.capitalize()}\n")
-        for t in st_tasks:
-            due_s = f" · due {t['due']}" if t['due'] else ""
-            if t['overdue']: due_s += " ⚠ OVERDUE"
-            rec_s = f" · every {t['recurrence']}d" if t['recurrence'] else ""
-            print(f"- **[{t['priority']:02d}]** `{t['project']}` {t['name'].title()}{due_s}{rec_s}")
-            for ss in ["active", "completed"]:
-                subs = t.get("subtasks", {}).get(ss, [])
-                for sub in subs:
-                    check = "x" if ss == "completed" else " "
-                    print(f"  - [{check}] {sub['name'].title()}")
-    print()
-
-def cmd_remote_new(args):
-    data = {
-        "name": args.name,
-        "priority": args.priority,
-        "project": args.project,
-        "description": args.description,
-        "due": args.due,
-        "recur": args.recur
-    }
-    res = remote_request("POST", "/api/tasks", json=data)
-    if res: print(f"✓ Created '{res['slug']}' on remote")
-
-def cmd_remote_action(action_path, task_name, success_msg):
-    tasks = remote_request("GET", "/api/tasks?all=true")
-    if not tasks: return
-    matches = [t["slug"] for t in tasks if task_name.lower() in t["slug"].lower()]
-    if not matches: print(f"✗ Task '{task_name}' not found on remote."); return
-    if len(matches) > 1: print(f"✗ Ambiguous matches: {', '.join(matches)}"); return
-    
-    res = remote_request("POST", f"/api/tasks/{matches[0]}/{action_path}")
-    if res: print(f"✓ {success_msg}: {matches[0]}")
-
-
-# ── Commands ──────────────────────────────────────────────────────────────────
-
-def cmd_init(args):
-    init_tasks_dir()
-    if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(json.dumps({"tasks_dir": str(DEFAULT_TASKS_DIR)}, indent=2))
-    print(f"✓ Toledo initialized at {get_tasks_dir()}")
-
-
-def cmd_new(args):
-    init_tasks_dir()
-    priority = args.priority or 50
-    project = (args.project or "GEN").upper()
-    slug = make_task_slug(priority, project, args.name)
-    state = "active"
-    task_folder = get_tasks_dir() / state / slug
-
-    if task_folder.exists():
-        print(f"✗ Task '{slug}' already exists in {state}/"); return
-
-    ensure_dir(task_folder)
-    desc = args.description or f"# {args.name}\n\n_No description provided._\n"
-    if not desc.startswith("#"):
-        desc = f"# {args.name}\n\n{desc}\n"
-    (task_folder / "description.md").write_text(desc)
-    if args.due:
-        (task_folder / "due.txt").write_text(args.due)
-    if args.recur:
-        (task_folder / "recurrence.txt").write_text(str(args.recur))
-    append_log(task_folder, "created", state=state, priority=priority, project=project)
-    print(f"✓ Created '{slug}' in {state}/")
-    if args.recur:
-        print(f"  Recurs every {args.recur} day(s)")
-
-
-def is_overdue(task_folder):
-    df = task_folder / "due.txt"
-    if not df.exists(): return False
-    try:
-        return df.read_text().strip() < datetime.now().strftime("%Y-%m-%d")
-    except Exception:
-        return False
-
-
-def cmd_status(args):
-    projects = load_projects()
-    project_filter = getattr(args, "project", None)
-    if project_filter:
-        project_filter = project_filter.upper()
-    lines = ["# Toledo Task Status\n",
-             f"_Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n"]
-    if project_filter:
-        label = proj_display_name(projects, project_filter)
-        lines.append(f"_Project filter: `{project_filter}` — {label}_\n")
-    show = STATES if getattr(args, "all", False) else ["active", "completed"]
-
-    for state in show:
-        sd = get_tasks_dir() / state
-        if not sd.exists(): continue
-        tasks = [f for f in sd.iterdir() if f.is_dir()]
-        if project_filter:
-            tasks = [t for t in tasks if parse_task_slug(t.name)["project"] == project_filter]
-        if not tasks: continue
-
-        def sort_key(t):
-            info = parse_task_slug(t.name)
-            df = t / "due.txt"
-            return (info["priority"], df.read_text().strip() if df.exists() else "9999")
-
-        tasks.sort(key=sort_key)
-        lines.append(f"\n## {state.capitalize()}\n")
-
-        for task in tasks:
-            info = parse_task_slug(task.name)
-            df = task / "due.txt"
-            rf = task / "recurrence.txt"
-            due_str = df.read_text().strip() if df.exists() else None
-            overdue = due_str and due_str < datetime.now().strftime("%Y-%m-%d")
-            due_s = f" · due {due_str}" if due_str else ""
-            if overdue: due_s += " ⚠ OVERDUE"
-            rec_s = f" · every {rf.read_text().strip()}d" if rf.exists() else ""
-            lines.append(f"- **[{info['priority']:02d}]** `{info['project']}` "
-                         f"{info['name'].title()}{due_s}{rec_s}")
-            for ss in SUBTASK_STATES:
-                sub_dir = task / "subtasks" / ss
-                if sub_dir.exists():
-                    for sub in sorted(sub_dir.iterdir()):
-                        if sub.is_dir():
-                            si = parse_task_slug(sub.name)
-                            check = "x" if ss == "completed" else " "
-                            lines.append(f"  - [{check}] {si['name'].title()}")
-
-    print("\n".join(lines))
-
-
-def cmd_move(args):
-    r = find_task(args.task)
-    if not r: print(f"✗ Task '{args.task}' not found."); return
-    task_folder, cur = r
-    new_folder = get_tasks_dir() / args.to / task_folder.name
-    task_folder.rename(new_folder)
-    append_log(new_folder, "state_changed", from_state=cur, to_state=args.to)
-    print(f"✓ Moved '{task_folder.name}': {cur} → {args.to}")
-
-
-def cmd_done(args):
-    r = find_task(args.task)
-    if not r: print(f"✗ Task '{args.task}' not found."); return
-    task_folder, cur = r
-    rf = task_folder / "recurrence.txt"
-    if rf.exists():
-        days = int(rf.read_text().strip())
-        new_due = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
-        (task_folder / "due.txt").write_text(new_due)
-        append_log(task_folder, "completed_recurring", next_due=new_due)
-        print(f"✓ Done. Next due: {new_due}")
-    else:
-        nf = get_tasks_dir() / "completed" / task_folder.name
-        task_folder.rename(nf)
-        append_log(nf, "state_changed", from_state=cur, to_state="completed")
-        print(f"✓ Completed '{task_folder.name}'")
-
-
-def cmd_cancel(args):
-    r = find_task(args.task)
-    if not r: print(f"✗ Task '{args.task}' not found."); return
-    task_folder, cur = r
-    if not (task_folder / "recurrence.txt").exists():
-        print(f"✗ '{task_folder.name}' is not a recurring task. Use 'move' instead."); return
-    nf = get_tasks_dir() / "completed" / task_folder.name
-    task_folder.rename(nf)
-    append_log(nf, "recurring_cancelled")
-    print(f"✓ Cancelled recurring task → completed/")
-
-
-def cmd_ctx(args):
-    task_arg = getattr(args, "task", "show") or "show"
-    if task_arg == "clear":
-        clear_context(); print("✓ Context cleared."); return
-    if task_arg == "show":
-        ctx = get_context()
-        print(f"Context: {ctx}" if ctx else "No context set."); return
-    r = find_task(task_arg)
-    if not r: print(f"✗ Task '{task_arg}' not found."); return
-    task_folder, state = r
-    set_context(task_folder.name)
-    print(f"✓ Context → '{task_folder.name}' ({state})")
-
-
-def cmd_sub(args):
-    ctx = get_context()
-    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Context task '{ctx}' not found."); return
-    task_folder, _ = r
-    p = args.priority or 50
-    slug = f"{p:02d}-{re.sub(r'[^a-z0-9]+', '-', args.name.lower()).strip('-')}"
-    sf = task_folder / "subtasks" / "active" / slug
-    ensure_dir(sf)
-    (sf / "description.md").write_text(args.description or f"# {args.name}\n\n_No description._\n")
-    if args.due:
-        (sf / "due.txt").write_text(args.due)
-    append_log(task_folder, "subtask_created", subtask=slug)
-    print(f"✓ Added subtask '{slug}'")
-
-
-def cmd_note(args):
-    ctx = get_context()
-    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Context task '{ctx}' not found."); return
-    task_folder, _ = r
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    with open(task_folder / "worklog.md", "a") as f:
-        f.write(f"\n### {ts}\n\n{args.text}\n")
-    append_log(task_folder, "note_added")
-    print(f"✓ Note appended to worklog")
-
-
-def cmd_edit(args):
-    ctx = getattr(args, "task", None) or get_context()
-    if not ctx: print("✗ No task/context."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Task '{ctx}' not found."); return
-    task_folder, _ = r
-    df = task_folder / "description.md"
-    if df.exists():
-        ad = task_folder / "description_archive"
-        ensure_dir(ad)
-        df.rename(ad / f"description_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
-    df.write_text(args.text)
-    append_log(task_folder, "description_updated")
-    print(f"✓ Description updated (old version archived)")
-
-
-def cmd_due(args):
-    ctx = getattr(args, "task", None) or get_context()
-    if not ctx: print("✗ No task/context."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Task '{ctx}' not found."); return
-    task_folder, _ = r
-    (task_folder / "due.txt").write_text(args.date)
-    append_log(task_folder, "due_date_set", date=args.date)
-    print(f"✓ Due date → {args.date}")
-
-
-def cmd_proj(args):
-    projects = load_projects()
-    if getattr(args, "remove", None):
-        code = args.remove.upper()
-        if code not in projects:
-            print(f"✗ Project '{code}' not found."); return
-        del projects[code]
-        save_projects(projects)
-        print(f"✓ Removed project '{code}'")
-        return
-    if getattr(args, "list", False) or not (getattr(args, "code", None) and getattr(args, "name", None)):
-        if not projects:
-            print("No projects defined.")
-        else:
-            print(f"  {'CODE':<8}  {'NAME':<30}  COLOR")
-            print(f"  {'-'*8}  {'-'*30}  -----")
-            for code, val in sorted(projects.items()):
-                if isinstance(val, dict):
-                    name  = val.get("name", "")
-                    color = val.get("color") or "(none)"
-                else:
-                    name, color = str(val), "(none)"
-                print(f"  {code:<8}  {name:<30}  {color}")
-        return
-    code = args.code.upper()
-    color = getattr(args, "color", None)
-    existing = projects.get(code)
-    if isinstance(existing, dict):
-        existing["name"] = args.name
-        if color:
-            existing["color"] = color
-        projects[code] = existing
-    else:
-        projects[code] = {"name": args.name, "color": color or ""}
-    save_projects(projects)
-    color_str = f"  color={color}" if color else ""
-    print(f"✓ Project '{code}' = '{args.name}'{color_str}")
-
-
-def cmd_show(args):
-    ctx = getattr(args, "task", None) or get_context()
-    if not ctx: print("✗ No task/context."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Task '{ctx}' not found."); return
-    task_folder, _ = r
-    df = task_folder / "description.md"
-    if not df.exists(): print("No description."); return
-    print(df.read_text())
-
-
-def cmd_search(args):
-    query = args.query.lower()
-    found = False
-    for state in STATES:
-        sd = get_tasks_dir() / state
-        if not sd.exists(): continue
-        for task in sorted(sd.iterdir()):
-            if not task.is_dir(): continue
-            hits = []
-            if query in task.name.lower():
-                hits.append("name")
-            for fname in ("description.md", "worklog.md"):
-                f = task / fname
-                if f.exists() and query in f.read_text().lower():
-                    hits.append(fname)
-            if hits:
-                found = True
-                info = parse_task_slug(task.name)
-                df = task / "due.txt"
-                due_s = f" · due {df.read_text().strip()}" if df.exists() else ""
-                print(f"[{state}] **[{info['priority']:02d}]** `{info['project']}` "
-                      f"{info['name'].title()}{due_s}  ({', '.join(hits)})")
-    if not found:
-        print(f"No tasks matching '{args.query}'.")
-
-
-def cmd_subdone(args):
-    ctx = get_context()
-    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Context task '{ctx}' not found."); return
-    task_folder, _ = r
-    active_dir = task_folder / "subtasks" / "active"
-    if not active_dir.exists(): print("No active subtasks."); return
-    matches = [f for f in active_dir.iterdir()
-               if f.is_dir() and args.name.lower() in f.name.lower()]
-    if not matches:
-        print(f"✗ No active subtask matching '{args.name}'."); return
-    if len(matches) > 1:
-        print(f"✗ Ambiguous — matches: {', '.join(f.name for f in matches)}"); return
-    sub = matches[0]
-    done_dir = task_folder / "subtasks" / "completed"
-    ensure_dir(done_dir)
-    sub.rename(done_dir / sub.name)
-    append_log(task_folder, "subtask_completed", subtask=sub.name)
-    print(f"✓ Subtask '{sub.name}' marked complete")
-
-
-def cmd_subrm(args):
-    ctx = get_context()
-    if not ctx: print("✗ No context. Use 'ctx <task>' first."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Context task '{ctx}' not found."); return
-    task_folder, _ = r
-    query = args.name.lower()
-    candidates = [
-        (ss, f)
-        for ss in SUBTASK_STATES
-        if (task_folder / "subtasks" / ss).exists()
-        for f in sorted((task_folder / "subtasks" / ss).iterdir())
-        if f.is_dir()
-    ]
-    matches = [c for c in candidates if c[1].name.lower() == query]
-    if not matches:
-        matches = [c for c in candidates if query in c[1].name.lower()]
-    if not matches:
-        print(f"✗ No subtask matching '{args.name}'."); return
-    if len(matches) > 1:
-        print(f"✗ Ambiguous — matches: {', '.join(f'{f.name} ({ss})' for ss, f in matches)}"); return
-    ss, sub = matches[0]
-    answer = input(f"Delete subtask '{sub.name}' ({ss}) permanently? [y/N] ")
-    if answer.strip().lower() != "y":
-        print("Aborted."); return
-    import shutil
-    shutil.rmtree(sub)
-    append_log(task_folder, "subtask_deleted", subtask=sub.name, state=ss)
-    print(f"✓ Deleted subtask '{sub.name}'")
-
-
-def cmd_upcoming(args):
-    days = getattr(args, "days", 7)
-    today = datetime.now().date()
-    cutoff = (today + timedelta(days=days)).strftime("%Y-%m-%d")
-    today_s = today.strftime("%Y-%m-%d")
-    found = False
-    for state in ["active"]:
-        sd = get_tasks_dir() / state
-        if not sd.exists(): continue
-        tasks = [f for f in sd.iterdir() if f.is_dir()]
-        tasks = [t for t in tasks if (t / "due.txt").exists()]
-        tasks = [t for t in tasks if (t / "due.txt").read_text().strip() <= cutoff]
-        tasks.sort(key=lambda t: (t / "due.txt").read_text().strip())
-        for task in tasks:
-            found = True
-            info = parse_task_slug(task.name)
-            due = (task / "due.txt").read_text().strip()
-            overdue = due < today_s
-            tag = " ⚠ OVERDUE" if overdue else (" · today" if due == today_s else f" · due {due}")
-            print(f"[{state}] **[{info['priority']:02d}]** `{info['project']}` "
-                  f"{info['name'].title()}{tag}")
-    if not found:
-        print(f"No tasks due within {days} day(s).")
-
-
-def cmd_archive(args):
-    r = find_task(args.task)
-    if not r: print(f"✗ Task '{args.task}' not found."); return
-    task_folder, cur = r
-    if cur == "archive":
-        print("Already archived."); return
-    nf = get_tasks_dir() / "archive" / task_folder.name
-    task_folder.rename(nf)
-    append_log(nf, "state_changed", from_state=cur, to_state="archive")
-    print(f"✓ Archived '{task_folder.name}'")
-
-
-def cmd_rm(args):
-    r = find_task(args.task)
-    if not r: print(f"✗ Task '{args.task}' not found."); return
-    task_folder, state = r
-    answer = input(f"Delete '{task_folder.name}' ({state}) permanently? [y/N] ")
-    if answer.strip().lower() != "y":
-        print("Aborted."); return
-    import shutil
-    shutil.rmtree(task_folder)
-    print(f"✓ Deleted '{task_folder.name}'")
-
-
-def cmd_reprioritize(args):
-    r = find_task(args.task)
-    if not r: print(f"✗ Task '{args.task}' not found."); return
-    task_folder, state = r
-    old_info = parse_task_slug(task_folder.name)
-    old_pri  = old_info["priority"]
-    new_pri  = args.priority
-    if old_pri == new_pri:
-        print(f"✗ Task already has priority {new_pri}."); return
-    new_slug   = f"{new_pri:02d}-{old_info['project']}-{old_info['name'].replace(' ', '-')}"
-    new_folder = get_tasks_dir() / state / new_slug
-    if new_folder.exists():
-        print(f"✗ A task with slug '{new_slug}' already exists."); return
-    task_folder.rename(new_folder)
-    # Update context if it pointed to the old slug
-    if get_context() == task_folder.name:
-        set_context(new_slug)
-    append_log(new_folder, "reprioritized", old_priority=old_pri, new_priority=new_pri)
-    print(f"✓ '{task_folder.name}' → '{new_slug}'")
-
-
-def cmd_worklog(args):
-    ctx = getattr(args, "task", None) or get_context()
-    if not ctx: print("✗ No task/context."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Task '{ctx}' not found."); return
-    task_folder, _ = r
-    wf = task_folder / "worklog.md"
-    if not wf.exists(): print("No worklog."); return
-    print(wf.read_text())
-
-
-def cmd_log(args):
-    ctx = getattr(args, "task", None) or get_context()
-    if not ctx: print("✗ No task/context."); return
-    r = find_task(ctx)
-    if not r: print(f"✗ Task '{ctx}' not found."); return
-    task_folder, _ = r
-    lf = task_folder / "activity.log"
-    if not lf.exists(): print("No activity log."); return
-    print(f"Log for '{task_folder.name}':\n")
-    for line in lf.read_text().splitlines():
-        e = json.loads(line)
-        ts, action = e.pop("ts"), e.pop("action")
-        extras = "  ".join(f"{k}={v}" for k, v in e.items())
-        print(f"  {ts}  {action:<28} {extras}")
-
-
-def cmd_config(args):
-    config = load_config()
-    if not args.key:
-        print(json.dumps(config, indent=2))
-        return
-
-    parts = args.key.split(".")
-    
-    if args.value is None and not args.unset:
-        # Get
-        val = config
-        for p in parts:
-            if isinstance(val, dict) and p in val:
-                val = val[p]
-            else:
-                val = None; break
-        if val is not None:
-            print(val if not isinstance(val, (dict, list)) else json.dumps(val))
-        return
-
-    if args.unset:
-        # Unset
-        val = config
-        for p in parts[:-1]:
-            if p in val and isinstance(val[p], dict):
-                val = val[p]
-            else:
-                return
-        if parts[-1] in val:
-            del val[parts[-1]]
-            save_config(config)
-            print(f"✓ Unset {args.key}")
-        return
-
-    # Set
-    val = config
-    for p in parts[:-1]:
-        if p not in val or not isinstance(val[p], dict):
-            val[p] = {}
-        val = val[p]
-    
-    new_val = args.value
-    # Try to parse as JSON for bools/ints/etc, fallback to string
-    try:
-        new_val = json.loads(args.value)
-    except:
-        pass
-        
-    val[parts[-1]] = new_val
-    save_config(config)
-    print(f"✓ {args.key} = {new_val}")
-
-
-def serialize_task_folder(task_folder):
-    """Recursively turn a task folder into a dict."""
-    task_data = {
-        "slug": task_folder.name,
-        "files": {},
-        "dirs": {}
-    }
-    for item in task_folder.iterdir():
-        if item.is_file():
-            task_data["files"][item.name] = item.read_text()
-        elif item.is_dir():
-            if item.name == "subtasks":
-                task_data["subtasks"] = {}
-                for sstate in SUBTASK_STATES:
-                    sstate_dir = item / sstate
-                    if sstate_dir.exists():
-                        task_data["subtasks"][sstate] = [
-                            serialize_task_folder(sub) for sub in sstate_dir.iterdir() if sub.is_dir()
-                        ]
-            else:
-                task_data["dirs"][item.name] = {
-                    f.name: f.read_text() for f in item.iterdir() if f.is_file()
-                }
-    return task_data
-
-
-def restore_task_folder(parent_dir, task_data):
-    """Recursively restore a task folder from a dict."""
-    task_folder = parent_dir / task_data["slug"]
-    ensure_dir(task_folder)
-    for fname, content in task_data.get("files", {}).items():
-        (task_folder / fname).write_text(content)
-
-    for dirname, dir_content in task_data.get("dirs", {}).items():
-        dpath = task_folder / dirname
-        ensure_dir(dpath)
-        for fname, fcontent in dir_content.items():
-            (dpath / fname).write_text(fcontent)
-
-    if "subtasks" in task_data:
-        for state, subtasks in task_data["subtasks"].items():
-            for sub_data in subtasks:
-                restore_task_folder(task_folder / "subtasks" / state, sub_data)
-
-
-def cmd_export(args):
-    data = {
-        "version": "1.0",
-        "exported_at": datetime.now().isoformat(),
-        "projects": load_projects(),
-        "context": get_context(),
-        "tasks": {}
-    }
-    tasks_dir = get_tasks_dir()
-    for state in STATES:
-        sd = tasks_dir / state
-        if not sd.exists(): continue
-        data["tasks"][state] = [
-            serialize_task_folder(t) for t in sd.iterdir() if t.is_dir()
-        ]
-    Path(args.file).write_text(json.dumps(data, indent=2))
-    print(f"✓ Exported everything to {args.file}")
-
-
-def cmd_import(args):
-    fpath = Path(args.file)
-    if not fpath.exists():
-        print(f"✗ File '{args.file}' not found."); return
-    data = json.loads(fpath.read_text())
-
-    tasks_dir = get_tasks_dir()
-    init_tasks_dir()
-
-    if "projects" in data:
-        projects = load_projects()
-        projects.update(data["projects"])
-        save_projects(projects)
-
-    for state, tasks in data.get("tasks", {}).items():
-        for task_data in tasks:
-            restore_task_folder(tasks_dir / state, task_data)
-
-    if "context" in data and data["context"]:
-        set_context(data["context"])
-
-    print(f"✓ Imported everything from {args.file}")
-
 
 def cmd_chat(args):
     import requests
-    import os
 
-    config = load_config()
-    server_url = get_remote_url() or "http://localhost:8000"
+    url = load_config().get("remote", {}).get("url")
+    server_url = url.rstrip("/") if url else "http://localhost:8000"
 
     messages = []
-    
+
     if args.message:
         messages.append({"role": "user", "content": " ".join(args.message)})
         try:
@@ -853,17 +495,17 @@ def cmd_chat(args):
             user_input = input("user> ")
             if user_input.lower() in ("exit", "quit"): break
             if not user_input.strip(): continue
-            
+
             messages.append({"role": "user", "content": user_input})
-            
+
             with Spinner():
                 r = requests.post(f"{server_url}/api/chat", json={"messages": messages})
                 r.raise_for_status()
                 res = r.json()
-            
+
             # Update history from server (compacted if needed)
             messages = res.get("history", messages)
-            
+
             print(f"ai> {res.get('message')}\n")
 
         except KeyboardInterrupt:
@@ -875,152 +517,155 @@ def cmd_chat(args):
 # ── CLI wiring ────────────────────────────────────────────────────────────────
 
 def main():
-    p = argparse.ArgumentParser(prog="toledo", description="Toledo task manager")
+    p = argparse.ArgumentParser(prog="toledo", description="Toledo task manager (MCP client)")
     s = p.add_subparsers(dest="command")
 
-    s.add_parser("init", help="Initialize Toledo")
+    s.add_parser("setup", help="Configure the MCP server connection")
 
-    pn = s.add_parser("new", help="Create a new task")
-    pn.add_argument("name", help="Task title")
-    pn.add_argument("-p","--priority", type=int, default=50)
-    pn.add_argument("-c","--project", default="GEN")
-    pn.add_argument("-d","--description")
+    ps = s.add_parser("status", aliases=["ls"], help="List tasks")
+    ps.add_argument("-a", "--all", action="store_true", help="All states")
+    ps.add_argument("-s", "--state", choices=STATES)
+    ps.add_argument("-c", "--project", metavar="CODE")
+    ps.add_argument("-r", "--recent", action="store_true", help="Newest updates first")
+    ps.add_argument("--days", type=int, help="Only tasks updated within N days")
+
+    psh = s.add_parser("show", aliases=["log", "worklog"], help="Show a task in full")
+    psh.add_argument("task", nargs="?")
+
+    pn = s.add_parser("new", help="Create a task")
+    pn.add_argument("name")
+    pn.add_argument("-p", "--priority", type=int)
+    pn.add_argument("-c", "--project")
+    pn.add_argument("-d", "--description")
     pn.add_argument("--due", metavar="YYYY-MM-DD")
     pn.add_argument("--recur", type=int, metavar="DAYS")
 
-    ps = s.add_parser("status", aliases=["ls"], help="Show tasks")
-    ps.add_argument("-a","--all", action="store_true")
-    ps.add_argument("-c","--project", metavar="CODE")
+    pd = s.add_parser("done", help="Complete a task (advances recurring ones)")
+    pd.add_argument("task")
+    pd.add_argument("-n", "--note", help="Closing note")
 
-    pm = s.add_parser("move", aliases=["mv"], help="Move task")
+    pm = s.add_parser("move", aliases=["mv"], help="Move a task to another state")
     pm.add_argument("task")
     pm.add_argument("to", choices=STATES)
 
-    pd = s.add_parser("done", help="Complete task")
-    pd.add_argument("task")
-
-    pc = s.add_parser("cancel", help="Cancel recurring")
-    pc.add_argument("task")
-
-    px = s.add_parser("ctx", help="Context")
-    px.add_argument("task", nargs="?", default="show")
-
-    psub = s.add_parser("sub", help="Add subtask")
-    psub.add_argument("name")
-    psub.add_argument("-p","--priority", type=int, default=50)
-    psub.add_argument("-d","--description")
-    psub.add_argument("--due", metavar="YYYY-MM-DD")
-
-    pnt = s.add_parser("note", help="Add note")
-    pnt.add_argument("text")
-
-    pe = s.add_parser("edit", help="Edit desc")
-    pe.add_argument("text")
-    pe.add_argument("-t","--task")
-
-    pdu = s.add_parser("due", help="Set due")
-    pdu.add_argument("date", metavar="YYYY-MM-DD")
-    pdu.add_argument("-t","--task")
-
-    pp = s.add_parser("proj", help="Manage projects")
-    pp.add_argument("code", nargs="?")
-    pp.add_argument("name", nargs="?")
-    pp.add_argument("-l","--list", action="store_true")
-    pp.add_argument("-r","--remove", metavar="CODE")
-    pp.add_argument("--color", metavar="HEX")
-
-    psh = s.add_parser("show", help="Show desc")
-    psh.add_argument("task", nargs="?")
-
-    psr = s.add_parser("search", help="Search tasks")
-    psr.add_argument("query")
-
-    psd = s.add_parser("subdone", help="Complete subtask")
-    psd.add_argument("name")
-
-    psrm = s.add_parser("subrm", help="Delete subtask")
-    psrm.add_argument("name")
-
-    pup = s.add_parser("upcoming", aliases=["today"], help="Upcoming tasks")
-    pup.add_argument("--days", type=int, default=7)
-
-    par = s.add_parser("archive", help="Archive task")
+    par = s.add_parser("archive", help="Archive a task")
     par.add_argument("task")
 
-    prm = s.add_parser("rm", help="Delete task")
+    pc = s.add_parser("cancel", help="Stop a recurring task and complete it")
+    pc.add_argument("task")
+
+    prm = s.add_parser("rm", help="Delete a task")
     prm.add_argument("task")
+    prm.add_argument("-y", "--yes", action="store_true", help="Don't ask for confirmation")
+
+    prn = s.add_parser("rename", help="Rename a task")
+    prn.add_argument("task")
+    prn.add_argument("name")
 
     pre = s.add_parser("reprioritize", aliases=["pri"], help="Change priority")
     pre.add_argument("task")
     pre.add_argument("priority", type=int)
 
-    pw = s.add_parser("worklog", help="Show worklog")
-    pw.add_argument("task", nargs="?")
+    prp = s.add_parser("reproject", help="Move a task to another project")
+    prp.add_argument("task")
+    prp.add_argument("project")
 
-    pl = s.add_parser("log", help="Show log")
-    pl.add_argument("task", nargs="?")
+    pdu = s.add_parser("due", help="Set due date ('' clears)")
+    pdu.add_argument("date", metavar="YYYY-MM-DD")
+    pdu.add_argument("-t", "--task")
 
-    pch = s.add_parser("chat", help="Chat with tasks")
+    prc = s.add_parser("recur", help="Set recurrence in days (0 clears)")
+    prc.add_argument("days", type=int)
+    prc.add_argument("-t", "--task")
+
+    pnt = s.add_parser("note", help="Add a note")
+    pnt.add_argument("text")
+    pnt.add_argument("-t", "--task")
+
+    pe = s.add_parser("edit", help="Replace the description")
+    pe.add_argument("text")
+    pe.add_argument("-t", "--task")
+
+    psub = s.add_parser("sub", help="Add a subtask")
+    psub.add_argument("name")
+    psub.add_argument("-t", "--task")
+    psub.add_argument("-p", "--priority", type=int)
+    psub.add_argument("--due", metavar="YYYY-MM-DD")
+
+    psd = s.add_parser("subdone", help="Complete a subtask")
+    psd.add_argument("name")
+    psd.add_argument("-t", "--task")
+
+    psrm = s.add_parser("subrm", help="Delete a subtask")
+    psrm.add_argument("name")
+    psrm.add_argument("-t", "--task")
+    psrm.add_argument("-y", "--yes", action="store_true")
+
+    psr = s.add_parser("search", help="Search tasks")
+    psr.add_argument("query")
+
+    pup = s.add_parser("upcoming", aliases=["today"], help="Tasks due soon")
+    pup.add_argument("--days", type=int, default=7)
+
+    px = s.add_parser("ctx", help="Set/show/clear the current task")
+    px.add_argument("task", nargs="?", default="show")
+
+    pp = s.add_parser("proj", help="List/add/remove/rename/merge projects")
+    pp.add_argument("code", nargs="?")
+    pp.add_argument("name", nargs="?")
+    pp.add_argument("--color", metavar="HEX")
+    pp.add_argument("-r", "--remove", metavar="CODE")
+    pp.add_argument("--rename", nargs=2, metavar=("OLD", "NEW"))
+    pp.add_argument("--merge", nargs=2, metavar=("FROM", "INTO"))
+
+    pg = s.add_parser("glossary", help="Show glossary, or add TERM CANONICAL")
+    pg.add_argument("term", nargs="?")
+    pg.add_argument("canonical", nargs="?")
+
+    ppr = s.add_parser("prompt", help="List guided-session prompts, or show one")
+    ppr.add_argument("name", nargs="?")
+
+    pt = s.add_parser("tools", help="List the server's MCP tools")
+    pt.add_argument("-v", "--verbose", action="store_true")
+
+    pca = s.add_parser("call", help="Call any MCP tool: call TOOL key=value ...")
+    pca.add_argument("tool")
+    pca.add_argument("params", nargs="*")
+
+    pch = s.add_parser("chat", help="Chat with the web server's assistant")
     pch.add_argument("message", nargs="*")
 
-    pcfg = s.add_parser("config", help="Config")
+    pcfg = s.add_parser("config", help="Get/set config values (dotted keys)")
     pcfg.add_argument("key", nargs="?")
     pcfg.add_argument("value", nargs="?")
     pcfg.add_argument("--unset", action="store_true")
 
-    pexp = s.add_parser("export", help="Export JSON")
-    pexp.add_argument("file")
-
-    pimp = s.add_parser("import", help="Import JSON")
-    pimp.add_argument("file")
-
     args = p.parse_args()
-    if args.command not in LIVE_COMMANDS:
-        print("✗ The toledo CLI is deprecated: tasks now live in the SQLite database.\n"
-              "  Use the web app or MCP server. Still available: chat, config, export.")
-        raise SystemExit(1)
-    remote_url = get_remote_url()
-
-    if remote_url and args.command not in ["config", "export", "import", "init"]:
-        if args.command in ["status", "ls"]:
-            cmd_remote_status(args); return
-        if args.command == "new":
-            cmd_remote_new(args); return
-        if args.command == "done":
-            cmd_remote_action("done", args.task, "Completed"); return
-        if args.command == "cancel":
-            cmd_remote_action("cancel", args.task, "Cancelled"); return
-        if args.command == "archive":
-            cmd_remote_action("archive", args.task, "Archived"); return
-        if args.command == "chat":
-            cmd_chat(args); return
-        
-        print(f"⚠ Remote mode enabled: {remote_url}")
-        print(f"⚠ Command '{args.command}' not yet mapped for remote use.")
-        return
 
     dispatch = {
-        "init": cmd_init, "new": cmd_new,
+        "setup": cmd_setup,
         "status": cmd_status, "ls": cmd_status,
+        "show": cmd_show, "log": cmd_show, "worklog": cmd_show,
+        "new": cmd_new, "done": cmd_done,
         "move": cmd_move, "mv": cmd_move,
-        "done": cmd_done, "cancel": cmd_cancel,
-        "ctx": cmd_ctx, "sub": cmd_sub,
-        "note": cmd_note, "edit": cmd_edit,
-        "due": cmd_due, "proj": cmd_proj,
-        "show": cmd_show, "search": cmd_search,
-        "subdone": cmd_subdone, "subrm": cmd_subrm,
-        "upcoming": cmd_upcoming, "today": cmd_upcoming,
-        "archive": cmd_archive, "rm": cmd_rm,
+        "archive": cmd_archive, "cancel": cmd_cancel, "rm": cmd_rm,
+        "rename": cmd_rename,
         "reprioritize": cmd_reprioritize, "pri": cmd_reprioritize,
-        "worklog": cmd_worklog, "log": cmd_log,
+        "reproject": cmd_reproject,
+        "due": cmd_due, "recur": cmd_recur,
+        "note": cmd_note, "edit": cmd_edit,
+        "sub": cmd_sub, "subdone": cmd_subdone, "subrm": cmd_subrm,
+        "search": cmd_search, "upcoming": cmd_upcoming, "today": cmd_upcoming,
+        "ctx": cmd_ctx, "proj": cmd_proj, "glossary": cmd_glossary,
+        "prompt": cmd_prompt, "tools": cmd_tools, "call": cmd_call,
         "chat": cmd_chat, "config": cmd_config,
-        "export": cmd_export, "import": cmd_import,
     }
 
     if args.command in dispatch:
         dispatch[args.command](args)
     else:
         p.print_help()
+
 
 if __name__ == "__main__":
     main()
