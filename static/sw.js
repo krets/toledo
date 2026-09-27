@@ -1,7 +1,7 @@
-const CACHE = 'toledo-v7'; // Incremented version
+// The server stamps the UI build into the name, so each release gets a fresh cache.
+const CACHE = 'toledo-__TOLEDO_UI_BUILD__';
 const SHELL = [
   '/',
-  '/static/index.html?v=7',
   '/manifest.json',
   '/static/icon-192.png',
   '/static/icon-512.png',
@@ -29,8 +29,20 @@ self.addEventListener('fetch', e => {
     // Network-only for API calls to ensure auth state is always fresh
     // We remove the .catch() so that 401s and network errors propagate to the app
     e.respondWith(fetch(e.request));
+  } else if (e.request.mode === 'navigate') {
+    // Network-first for the page itself, so a deploy shows on the next load;
+    // the cached copy is only for offline use.
+    e.respondWith(
+      fetch(e.request).then(r => {
+        if (r.ok && r.type === 'basic') {
+          const copy = r.clone();
+          caches.open(CACHE).then(c => c.put('/', copy));
+        }
+        return r;
+      }).catch(() => caches.match('/'))
+    );
   } else {
-    // Cache-first for app shell
+    // Cache-first for icons and the manifest
     e.respondWith(
       caches.match(e.request).then(r => r || fetch(e.request))
     );

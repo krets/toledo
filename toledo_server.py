@@ -1,16 +1,46 @@
 #!/usr/bin/env python3
 """Toledo web server — serves the PWA and its JSON API over the SQLite store."""
 
+import hashlib
 import json
+import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, make_response, request, send_from_directory
 
 import toledo_db as db
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-BOOT_TIME = int(datetime.now().timestamp())
+STARTED = datetime.now().isoformat(timespec="seconds")
+
+
+def _release_commit() -> str:
+    """$TOLEDO_COMMIT (set by the Docker build), else the checkout's HEAD."""
+    commit = os.environ.get("TOLEDO_COMMIT", "").strip()
+    if commit:
+        return commit[:12]
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent,
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+COMMIT = _release_commit()
+# Changes whenever the web UI does. The page carries the value it was served
+# with and compares it with /api/version to notice it is a stale copy.
+UI_BUILD = hashlib.sha1(b"".join(
+    (Path(app.static_folder) / f).read_bytes() for f in ("index.html", "sw.js")
+)).hexdigest()[:10]
+
+
+def _stamp(text: str) -> str:
+    return text.replace("__TOLEDO_COMMIT__", COMMIT).replace("__TOLEDO_UI_BUILD__", UI_BUILD)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,7 +89,15 @@ def toledo_error(e):
 
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    resp = make_response(_stamp((Path(app.static_folder) / "index.html").read_text()))
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/api/version")
+def version():
+    return jsonify({"commit": COMMIT, "ui": UI_BUILD, "started": STARTED})
 
 @app.route("/manifest.json")
 def manifest():
@@ -67,15 +105,11 @@ def manifest():
 
 @app.route("/sw.js")
 def sw():
-    from flask import make_response
     sw_path = Path(app.static_folder) / "sw.js"
     if not sw_path.exists():
         return "Not found", 404
-    content = sw_path.read_text()
-    # Replace version placeholders
-    content = content.replace("toledo-v3", f"toledo-{BOOT_TIME}")
-    content = content.replace("?v=3", f"?v={BOOT_TIME}")
-    resp = make_response(content)
+    # The stamped build gives each UI release its own cache name.
+    resp = make_response(_stamp(sw_path.read_text()))
     resp.headers["Content-Type"] = "application/javascript"
     resp.headers["Service-Worker-Allowed"] = "/"
     # Ensure browsers don't cache sw.js itself too long

@@ -21,6 +21,10 @@ USER root
 RUN chmod +x toledo
 USER toledo
 
+# Release commit shown in the web UI; the image has no .git to read it from
+ARG TOLEDO_COMMIT=
+ENV TOLEDO_COMMIT=$TOLEDO_COMMIT
+
 # Default environment for data persistence
 # (Home directory will be /home/toledo)
 ENV HOME=/home/toledo
