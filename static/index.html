@@ -354,6 +354,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .btn-s{background:var(--surface3);color:var(--text)}
 .btn-d{background:var(--danger);color:#fff}
 
+/* Settings */
+.settings-section{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--accent);margin:4px 0 12px}
+.settings-hint{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.4}
+.settings-hint a{color:var(--accent)}
+.settings-test{margin-top:12px;padding:9px 11px;border-radius:var(--r);font-size:13px;word-break:break-word}
+.settings-test.ok{background:rgba(39,174,96,.12);color:#27ae60}
+.settings-test.err{background:rgba(231,76,60,.1);color:var(--danger)}
+
 /* Toast */
 #toast{
   position:fixed;bottom:calc(env(safe-area-inset-bottom,0) + 16px);
@@ -419,6 +427,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
       <div class="ham-item" onclick="App.setView('archive')">
         <svg viewBox="0 0 24 24"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         Archive
+      </div>
+      <div class="ham-item" onclick="App.setView('settings')">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Settings
       </div>
     </div>
   </div>
@@ -622,6 +634,7 @@ App.setView = function(v) {
   // Close menus
   document.querySelectorAll('.filter-dropdown,#ham-menu').forEach(d => d.classList.remove('open'));
   App.view = v;
+  if (v === 'settings') { App.loadSettings(); return; }
   App.loadTasks().then(() => App.renderMain());
 };
 
@@ -653,6 +666,11 @@ App.renderMain = function() {
       break;
     case 'projects':
       el.innerHTML = App.buildProjectsView();
+      fab.style.display = 'none';
+      back.style.display = 'block';
+      break;
+    case 'settings':
+      el.innerHTML = App.buildSettingsView();
       fab.style.display = 'none';
       back.style.display = 'block';
       break;
@@ -1003,6 +1021,129 @@ App.deleteProject = async function(code) {
     App.renderMain();
     App.toast(`Removed ${code}`);
   } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+// ── Settings view ─────────────────────────────────────────────────────────────
+App.loadSettings = async function() {
+  try {
+    App.settings = await api('GET', '/api/settings');
+    App.settingsForm = { ...App.settings.llm, token_limit: App.settings.chat.token_limit };
+    App.settingsModels = [];
+  } catch(e) { App.toast('✗ ' + e.message); }
+  App.renderMain();
+};
+
+App.settingsProvider = function(id) {
+  return (App.settings?.providers || []).find(p => p.id === id) || {};
+};
+
+App.buildSettingsView = function() {
+  if (!App.settings) return `<div class="view-header">Settings</div><div class="empty"><p>Loading…</p></div>`;
+  const f = App.settingsForm;
+  const prov = App.settingsProvider(f.provider);
+  const keyNote = prov.key_hint
+    ? `Saved key ${esc(prov.key_hint)}. Leave blank to keep it.`
+    : (prov.needs_key ? 'Required for this provider.' : 'Optional. Most local servers don’t need one.');
+  const baseHint = prov.default_base_url
+    ? `Default ${esc(prov.default_base_url)}. When the server runs in Docker, use host.docker.internal instead of localhost.`
+    : (f.provider === 'custom' ? 'Your server’s OpenAI-compatible endpoint, e.g. http://host:8080/v1' : 'Leave blank to use the provider’s standard endpoint.');
+  return `<div class="view-header">Settings</div>
+    <div style="padding:12px 14px">
+      <div class="settings-section">Chat LLM</div>
+      <div class="fg"><label>Provider</label>
+        <select id="s-provider" onchange="App.changeSettingsProvider(this.value)">
+          ${App.settings.providers.map(p => `<option value="${esc(p.id)}"${p.id === f.provider ? ' selected' : ''}>${esc(p.label)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="fg"><label>Model</label>
+        <div style="display:flex;gap:8px">
+          <input id="s-model" type="text" list="s-models" autocomplete="off" value="${esc(f.model || '')}" placeholder="Model name" oninput="App.settingsForm.model=this.value">
+          <button class="abtn" style="flex-shrink:0" onclick="App.loadSettingsModels()">Load models</button>
+        </div>
+        <datalist id="s-models">${App.settingsModels.map(m => `<option value="${esc(m)}">`).join('')}</datalist>
+        ${App.settingsModels.length ? `<div class="settings-hint">${App.settingsModels.length} models available. Start typing to pick one.</div>` : ''}
+      </div>
+      <div class="fg"><label>Base URL</label>
+        <input id="s-base" type="url" autocomplete="off" value="${esc(f.base_url || '')}" placeholder="${esc(prov.default_base_url || '')}" oninput="App.settingsForm.base_url=this.value">
+        <div class="settings-hint">${baseHint}</div>
+      </div>
+      <div class="fg"><label>API key</label>
+        <input id="s-key" type="password" autocomplete="off" value="${esc(f.api_key || '')}" placeholder="${prov.key_hint ? '••••••••' : ''}" oninput="App.settingsForm.api_key=this.value">
+        <div class="settings-hint">${keyNote}${prov.key_hint ? ` <a href="#" onclick="App.clearSettingsKey();return false">Remove saved key</a>` : ''}</div>
+      </div>
+      <div class="fg"><label>Summarize chat history after (estimated tokens)</label>
+        <input id="s-limit" type="number" min="500" step="500" value="${esc(f.token_limit)}" oninput="App.settingsForm.token_limit=this.value">
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-s" onclick="App.testSettings()">Test</button>
+        <button class="btn btn-p" onclick="App.saveSettings()">Save</button>
+      </div>
+      ${App.settingsTest ? `<div class="settings-test ${App.settingsTest.ok ? 'ok' : 'err'}">${esc(App.settingsTest.text)}</div>` : ''}
+    </div>`;
+};
+
+App.changeSettingsProvider = function(id) {
+  const f = App.settingsForm;
+  f.provider = id;
+  f.api_key = '';
+  f.base_url = '';
+  // Keep the saved model when switching back to the saved provider
+  f.model = id === App.settings.llm.provider ? App.settings.llm.model : '';
+  if (id === App.settings.llm.provider) f.base_url = App.settings.llm.base_url;
+  App.settingsModels = [];
+  App.settingsTest = null;
+  App.renderMain();
+};
+
+App.settingsBody = function() {
+  const f = App.settingsForm;
+  return { provider: f.provider, model: (f.model || '').trim(), base_url: (f.base_url || '').trim(),
+           api_key: (f.api_key || '').trim(), token_limit: parseInt(f.token_limit) || null };
+};
+
+App.loadSettingsModels = async function() {
+  App.toast('Loading models…');
+  try {
+    const res = await api('POST', '/api/settings/models', App.settingsBody());
+    App.settingsModels = res.models;
+    App.renderMain();
+    App.toast(res.models.length ? `✓ ${res.models.length} models` : 'No models returned');
+    const m = $('s-model'); if (m) m.focus();
+  } catch(e) { App.toast('✗ ' + e.message, 4000); }
+};
+
+App.testSettings = async function() {
+  App.settingsTest = { ok: true, text: 'Testing…' };
+  App.renderMain();
+  try {
+    const res = await api('POST', '/api/settings/test', App.settingsBody());
+    App.settingsTest = res.ok
+      ? { ok: true,  text: `✓ ${res.model} replied: ${res.reply}` }
+      : { ok: false, text: '✗ ' + res.error };
+  } catch(e) { App.settingsTest = { ok: false, text: '✗ ' + e.message }; }
+  App.renderMain();
+};
+
+App.saveSettings = async function() {
+  try {
+    App.settings = await api('PUT', '/api/settings', App.settingsBody());
+    App.settingsForm = { ...App.settings.llm, token_limit: App.settings.chat.token_limit };
+    App.settingsTest = null;
+    App.renderMain();
+    App.toast('✓ Settings saved');
+  } catch(e) { App.toast('✗ ' + e.message, 4000); }
+};
+
+App.clearSettingsKey = async function() {
+  const prov = App.settingsProvider(App.settingsForm.provider);
+  if (!confirm(`Remove the saved ${prov.label} API key?`)) return;
+  try {
+    // Clearing a key also saves the rest of the form, so require a model like Save does
+    App.settings = await api('PUT', '/api/settings', { ...App.settingsBody(), api_key: '', clear_api_key: true });
+    App.settingsForm = { ...App.settings.llm, token_limit: App.settings.chat.token_limit };
+    App.renderMain();
+    App.toast('Key removed');
+  } catch(e) { App.toast('✗ ' + e.message, 4000); }
 };
 
 // ── Task detail panel ─────────────────────────────────────────────────────────

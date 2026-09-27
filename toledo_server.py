@@ -376,6 +376,201 @@ Please take these details and remember them, just acknowldge that you are ready 
     return jsonify({"status": status_text})
 
 
+# ── LLM settings ──────────────────────────────────────────────────────────────
+#
+# config.json "llm" block:
+#   provider   key of LLM_PROVIDERS (absent in legacy configs → model used verbatim)
+#   model      model name without the litellm prefix, e.g. "gpt-4o-mini"
+#   base_url   optional endpoint override
+#   api_keys   {provider: key}, so switching providers doesn't lose keys
+#   api_key    legacy single key, folded into api_keys on the next save
+
+LLM_PROVIDERS = {
+    "openai":     {"label": "OpenAI",                     "prefix": "openai",      "needs_key": True},
+    "anthropic":  {"label": "Anthropic",                  "prefix": "anthropic",   "needs_key": True},
+    "gemini":     {"label": "Google Gemini",              "prefix": "gemini",      "needs_key": True},
+    "openrouter": {"label": "OpenRouter",                 "prefix": "openrouter",  "needs_key": True},
+    "groq":       {"label": "Groq",                       "prefix": "groq",        "needs_key": True},
+    "mistral":    {"label": "Mistral",                    "prefix": "mistral",     "needs_key": True},
+    "deepseek":   {"label": "DeepSeek",                   "prefix": "deepseek",    "needs_key": True},
+    "xai":        {"label": "xAI (Grok)",                 "prefix": "xai",         "needs_key": True},
+    "ollama":     {"label": "Ollama",                     "prefix": "ollama_chat", "needs_key": False,
+                   "base_url": "http://localhost:11434"},
+    "lm_studio":  {"label": "LM Studio",                  "prefix": "lm_studio",   "needs_key": False,
+                   "base_url": "http://localhost:1234/v1"},
+    "custom":     {"label": "Custom (OpenAI-compatible)", "prefix": "openai",      "needs_key": False,
+                   "base_url": ""},
+}
+
+
+def infer_provider(llm: dict) -> str:
+    """Best guess at the provider for a legacy config that only has a model string."""
+    if llm.get("provider") in LLM_PROVIDERS:
+        return llm["provider"]
+    model = llm.get("model") or ""
+    head = model.split("/", 1)[0] if "/" in model else None
+    for name, p in LLM_PROVIDERS.items():
+        if head in (name, p["prefix"]):
+            return name
+    if "claude" in model:
+        return "anthropic"
+    if "gemini" in model:
+        return "gemini"
+    if llm.get("base_url"):
+        return "custom"
+    return "openai"
+
+
+def strip_prefix(provider: str, model: str) -> str:
+    for p in {provider, LLM_PROVIDERS[provider]["prefix"]}:
+        if model.startswith(p + "/"):
+            return model[len(p) + 1:]
+    return model
+
+
+def provider_key(llm: dict, provider: str):
+    keys = llm.get("api_keys") or {}
+    if provider in keys:
+        return keys[provider]
+    # Legacy single key belongs to whatever provider the old config implied
+    if llm.get("api_key") and infer_provider(llm) == provider:
+        return llm["api_key"]
+    return None
+
+
+def resolve_llm(llm: dict, provider=None, model=None, base_url=None, api_key=None):
+    """(litellm model string, api_key, api_base) from config, with optional overrides."""
+    if provider is None and "provider" not in llm:
+        # Legacy config: pass the model string straight to litellm
+        return (model or llm.get("model") or "gpt-4o-mini",
+                api_key or llm.get("api_key"), base_url or llm.get("base_url"))
+    provider = provider or llm["provider"]
+    p = LLM_PROVIDERS[provider]
+    model = strip_prefix(provider, model or llm.get("model") or "")
+    if base_url is None:
+        base_url = llm.get("base_url")
+    return (f"{p['prefix']}/{model}",
+            api_key or provider_key(llm, provider),
+            base_url or p.get("base_url") or None)
+
+
+def settings_payload(config: dict) -> dict:
+    llm = config.get("llm", {})
+    provider = infer_provider(llm)
+    keys = {name: provider_key(llm, name) for name in LLM_PROVIDERS}
+    return {
+        "providers": [
+            {"id": name, "label": p["label"], "needs_key": p["needs_key"],
+             "default_base_url": p.get("base_url"),
+             # Never send keys back to the browser, just enough to recognise them
+             "key_hint": ("…" + keys[name][-4:]) if keys[name] else None}
+            for name, p in LLM_PROVIDERS.items()
+        ],
+        "llm": {
+            "provider": provider,
+            "model":    strip_prefix(provider, llm.get("model") or ""),
+            "base_url": llm.get("base_url") or "",
+        },
+        "chat": {"token_limit": config.get("chat", {}).get("token_limit", 2000)},
+    }
+
+
+def settings_request():
+    """Validated provider/model/base_url/api_key from a settings form body."""
+    data = request.json or {}
+    provider = data.get("provider")
+    if provider not in LLM_PROVIDERS:
+        raise db.ToledoError(f"Unknown provider: {provider}")
+    base_url = (data.get("base_url") or "").strip()
+    return data, provider, (data.get("model") or "").strip(), base_url, (data.get("api_key") or "").strip()
+
+
+@app.route("/api/settings", methods=["GET"])
+def get_settings():
+    return jsonify(settings_payload(db.load_config()))
+
+
+@app.route("/api/settings", methods=["PUT"])
+def put_settings():
+    data, provider, model, base_url, api_key = settings_request()
+    if not model:
+        return jsonify({"error": "Model is required"}), 400
+
+    config = db.load_config()
+    llm = config.setdefault("llm", {})
+    keys = llm.setdefault("api_keys", {})
+    if llm.get("api_key"):
+        keys.setdefault(infer_provider(llm), llm["api_key"])
+        del llm["api_key"]
+
+    if data.get("clear_api_key"):
+        keys.pop(provider, None)
+    elif api_key:
+        keys[provider] = api_key
+
+    llm["provider"] = provider
+    llm["model"] = strip_prefix(provider, model)
+    if base_url:
+        llm["base_url"] = base_url
+    else:
+        llm.pop("base_url", None)
+
+    token_limit = data.get("token_limit")
+    if token_limit is not None:
+        try:
+            config.setdefault("chat", {})["token_limit"] = max(500, int(token_limit))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Token limit must be a number"}), 400
+
+    db.save_config(config)
+    return jsonify(settings_payload(config))
+
+
+@app.route("/api/settings/models", methods=["POST"])
+def list_provider_models():
+    """Ask the provider which models it has, using the form's (unsaved) values."""
+    import litellm
+
+    _, provider, _, base_url, api_key = settings_request()
+    llm = db.load_config().get("llm", {})
+    api_key = api_key or provider_key(llm, provider)
+    api_base = base_url or LLM_PROVIDERS[provider].get("base_url") or None
+    try:
+        if provider == "ollama":
+            # litellm falls back to a canned list when Ollama is unreachable, so ask it directly
+            from urllib.request import urlopen
+            with urlopen(api_base.rstrip("/") + "/api/tags", timeout=10) as resp:
+                models = [m["name"] for m in json.load(resp).get("models", [])]
+        else:
+            models = litellm.get_valid_models(check_provider_endpoint=True,
+                                              custom_llm_provider=LLM_PROVIDERS[provider]["prefix"],
+                                              api_key=api_key, api_base=api_base)
+    except Exception as e:
+        return jsonify({"error": f"Couldn't list models: {e}"}), 502
+    if not models:
+        # litellm logs the failure and returns [] for a bad key or unreachable endpoint
+        return jsonify({"error": "No models returned. Check the API key and base URL."}), 502
+    return jsonify({"models": sorted({strip_prefix(provider, m) for m in models})})
+
+
+@app.route("/api/settings/test", methods=["POST"])
+def test_settings():
+    """One tiny completion with the form's (unsaved) values."""
+    from litellm import completion
+
+    _, provider, model, base_url, api_key = settings_request()
+    if not model:
+        return jsonify({"error": "Model is required"}), 400
+    llm = db.load_config().get("llm", {})
+    model, api_key, api_base = resolve_llm(llm, provider, model, base_url, api_key or None)
+    try:
+        resp = completion(model=model, api_key=api_key, api_base=api_base, timeout=30,
+                          messages=[{"role": "user", "content": "Reply with just the word OK."}])
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+    return jsonify({"ok": True, "model": model, "reply": (resp.choices[0].message.content or "").strip()})
+
+
 # ── Chat / LLM ────────────────────────────────────────────────────────────────
 
 CHATTABLE_TOOLS = [
@@ -581,7 +776,6 @@ def estimate_tokens(messages):
 def compact_history_via_llm(model, messages, api_key, base_url):
     """Uses the LLM to summarize older history to save context space."""
     from litellm import completion
-    import os
 
     # Keep the last 4 messages (2 rounds) untouched
     to_summarize = messages[:-4]
@@ -601,6 +795,7 @@ def compact_history_via_llm(model, messages, api_key, base_url):
         resp = completion(
             model=model,
             messages=[{"role": "system", "content": prompt}],
+            api_key=api_key,
             api_base=base_url
         )
         summary = resp.choices[0].message.content
@@ -614,26 +809,17 @@ def compact_history_via_llm(model, messages, api_key, base_url):
 @app.route("/api/chat", methods=["POST"])
 def chat():
     from litellm import completion
-    import os
 
     data, err, code = require_json("messages")
     if err:
         return err, code
 
     config = db.load_config()
-    llm_config = config.get("llm", {})
-    model = llm_config.get("model", "gpt-4o-mini")
-    api_key = llm_config.get("api_key")
-    base_url = llm_config.get("base_url")
+    model, api_key, base_url = resolve_llm(config.get("llm", {}))
 
     chat_config = config.get("chat", {})
     # Default to 2000 estimated tokens before compaction
     token_limit = chat_config.get("token_limit", 2000)
-
-    if api_key:
-        if "gpt" in model or "openai" in model: os.environ["OPENAI_API_KEY"] = api_key
-        elif "claude" in model or "anthropic" in model: os.environ["ANTHROPIC_API_KEY"] = api_key
-        else: os.environ["LITELLM_API_KEY"] = api_key
 
     user_msgs = data["messages"]
 
@@ -679,6 +865,7 @@ INSTRUCTIONS:
             response = completion(
                 model=model,
                 messages=messages,
+                api_key=api_key,
                 api_base=base_url,
                 tools=CHATTABLE_TOOLS,
                 tool_choice="auto"

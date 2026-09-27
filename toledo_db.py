@@ -126,6 +126,15 @@ def load_config() -> dict:
     return {}
 
 
+def save_config(config: dict) -> None:
+    """Write config.json atomically; it can hold API keys, so keep it private."""
+    TOLEDO_HOME.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(config, indent=2))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONFIG_PATH)
+
+
 def db_path() -> Path:
     env = os.environ.get("TOLEDO_DB")
     if env:
