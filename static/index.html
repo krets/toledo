@@ -89,6 +89,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   box-shadow:0 4px 16px rgba(107,156,232,.45);z-index:99;transition:transform .15s;
 }
 #fab:active{transform:scale(.93)}
+/* The detail panel covers the FAB's corner; sit beside it, or hide when there's no room */
+body.panel-open #fab{right:636px}
+@media (max-width:700px){body.panel-open #fab{display:none !important}}
 
 /* ── Filter bar ── */
 .filter-bar{
@@ -466,22 +469,22 @@ const $ = id => document.getElementById(id);
 // ── Priority helpers ──────────────────────────────────────────────────────────
 function priLabel(n) {
   n = parseInt(n);
-  if (n <= 24)  return 'Ultra High';
-  if (n === 25) return 'High';
-  if (n <= 49)  return 'Med-High';
+  if (n >= 76)  return 'Ultra High';
+  if (n === 75) return 'High';
+  if (n >= 51)  return 'Med-High';
   if (n === 50) return 'Medium';
-  if (n <= 74)  return 'Med-Low';
-  if (n === 75) return 'Low';
+  if (n >= 26)  return 'Med-Low';
+  if (n === 25) return 'Low';
   return 'Very Low';
 }
 function priColor(n) {
   n = parseInt(n);
-  if (n <= 24)  return '#c0392b';
-  if (n === 25) return '#e74c3c';
-  if (n <= 49)  return '#e67e22';
+  if (n >= 76)  return '#c0392b';
+  if (n === 75) return '#e74c3c';
+  if (n >= 51)  return '#e67e22';
   if (n === 50) return '#f0a500';
-  if (n <= 74)  return '#2980b9';
-  if (n === 75) return '#27ae60';
+  if (n >= 26)  return '#2980b9';
+  if (n === 25) return '#27ae60';
   return '#555';
 }
 
@@ -619,9 +622,9 @@ App.filteredTasks = function() {
   if (App.priFilter !== 'any') {
     tasks = tasks.filter(t => {
       const p = parseInt(t.priority);
-      if (App.priFilter === 'high')   return p <= 49;
+      if (App.priFilter === 'high')   return p >= 51;
       if (App.priFilter === 'medium') return p === 50;
-      if (App.priFilter === 'low')    return p >= 51;
+      if (App.priFilter === 'low')    return p <= 49;
       return true;
     });
   }
@@ -814,7 +817,7 @@ App.buildFilterBar = function() {
   ).join('');
 
   // Priority dropdown
-  const priLabelMap = {any:'Any Priority',high:'High (0–49)',medium:'Medium (50)',low:'Low (51–99)'};
+  const priLabelMap = {any:'Any Priority',high:'High (51–99)',medium:'Medium (50)',low:'Low (1–49)'};
   const priLabelText = priLabelMap[App.priFilter] || 'Any Priority';
   let priDd = Object.entries(priLabelMap).map(([v,l]) =>
     `<div class="fdd-item${App.priFilter === v ? ' on' : ''}" onclick='App.setPriFilter(${JSON.stringify(v)})'>${l}</div>`
@@ -1152,11 +1155,15 @@ App.openTask = async function(slug) {
     App.task = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
     App.renderPanel();
     $('panel').classList.add('open');
+    document.body.classList.add('panel-open');
     $('panel-body').scrollTop = 0;
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
-App.closePanel = function() { $('panel').classList.remove('open'); };
+App.closePanel = function() {
+  $('panel').classList.remove('open');
+  document.body.classList.remove('panel-open');
+};
 
 App.renderPanel = function() {
   const tk = App.task;
@@ -1393,9 +1400,9 @@ App.openSheet = function(type) {
         <div class="frow">
           <div class="fg"><label>Priority</label>
             <div class="pri-quick-sm">
-              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(25)">High</button>
+              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(75)">High</button>
               <button class="pq-btn-sm" style="background:#f0a500" onclick="App.setPriQuick(50)">Med</button>
-              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(75)">Low</button>
+              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(25)">Low</button>
             </div>
             <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px">
           </div>
@@ -1429,9 +1436,9 @@ App.openSheet = function(type) {
         <div class="frow">
           <div class="fg"><label>Priority</label>
             <div class="pri-quick-sm">
-              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(25)">High</button>
+              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(75)">High</button>
               <button class="pq-btn-sm" style="background:#f0a500" onclick="App.setPriQuick(50)">Med</button>
-              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(75)">Low</button>
+              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(25)">Low</button>
             </div>
             <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px">
           </div>
@@ -1456,11 +1463,11 @@ App.openSheet = function(type) {
       body: () => `
         <div class="fg"><label>Current: ${App.task?.priority} · ${priLabel(App.task?.priority ?? 50)}</label></div>
         <div class="pri-quick">
-          <button class="pq-btn" style="background:#e74c3c" onclick="App.setPriQuick(25)">High · 25</button>
+          <button class="pq-btn" style="background:#e74c3c" onclick="App.setPriQuick(75)">High · 75</button>
           <button class="pq-btn" style="background:#f0a500" onclick="App.setPriQuick(50)">Medium · 50</button>
-          <button class="pq-btn" style="background:#27ae60" onclick="App.setPriQuick(75)">Low · 75</button>
+          <button class="pq-btn" style="background:#27ae60" onclick="App.setPriQuick(25)">Low · 25</button>
         </div>
-        <div class="fg"><label>Or enter a number (1–99)</label><input id="f-pri" type="number" min="1" max="99" value="${App.task?.priority ?? 50}"></div>
+        <div class="fg"><label>Or enter a number (1–99, higher = more important)</label><input id="f-pri" type="number" min="1" max="99" value="${App.task?.priority ?? 50}"></div>
         <div class="btn-row">
           <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
           <button class="btn btn-p" onclick="App.submitReprioritize()">Save</button>

@@ -32,7 +32,9 @@ SUBTASK_STATES = ["active", "completed"]
 DEFAULT_PROJECT = "GEN"
 DEFAULT_PRIORITY = 50
 
-SCHEMA_VERSION = 1
+# Priority is 1–99, higher = more important. Schema 1 stored it the other
+# way round (lower = more important); _upgrade flips old databases.
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -162,15 +164,30 @@ def _init(conn: sqlite3.Connection, path: Path) -> None:
     # The web and MCP servers share one database; the write lock makes sure
     # only the first of them to start runs the legacy migration.
     conn.execute("BEGIN IMMEDIATE")
-    if conn.execute("SELECT 1 FROM meta WHERE key = 'schema_version'").fetchone():
-        conn.commit()
-        return
-    conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
-    legacy = Path(load_config().get("tasks_dir") or LEGACY_TASKS_DIR)
-    if legacy.is_dir() and not os.environ.get("TOLEDO_NO_MIGRATE"):
-        counts = migrate_from_files(conn, legacy, LEGACY_CONTEXT_FILE)
-        print(f"ℹ Migrated legacy tasks from {legacy} into {path}: {counts}")
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if not row:
+        # Legacy files use the schema-1 priority scale; _upgrade converts them.
+        conn.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+        legacy = Path(load_config().get("tasks_dir") or LEGACY_TASKS_DIR)
+        if legacy.is_dir() and not os.environ.get("TOLEDO_NO_MIGRATE"):
+            counts = migrate_from_files(conn, legacy, LEGACY_CONTEXT_FILE)
+            print(f"ℹ Migrated legacy tasks from {legacy} into {path}: {counts}")
+    _upgrade(conn)
     conn.commit()
+
+
+def _upgrade(conn) -> None:
+    version = int(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0])
+    if version < 2:
+        # Flip priority so higher = more important, including the values
+        # recorded in the activity log.
+        conn.execute("UPDATE tasks SET priority = 100 - priority")
+        for key in ("priority", "old_priority", "new_priority"):
+            conn.execute(
+                f"UPDATE activity SET data = json_set(data, '$.{key}', 100 - json_extract(data, '$.{key}')) "
+                f"WHERE json_type(data, '$.{key}') = 'integer'"
+            )
+    conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
 
 
 @contextmanager
@@ -276,7 +293,7 @@ def _subtasks(conn, parent_ids: list[int]) -> dict[int, list[dict]]:
         return out
     marks = ",".join("?" * len(parent_ids))
     rows = conn.execute(
-        f"SELECT * FROM tasks WHERE parent_id IN ({marks}) ORDER BY priority, id",
+        f"SELECT * FROM tasks WHERE parent_id IN ({marks}) ORDER BY priority DESC, id",
         parent_ids,
     ).fetchall()
     for r in rows:
@@ -347,12 +364,12 @@ def _find_row(conn, ref: str):
     ).fetchone()
     if row:
         return row
-    # Partial match on slug, name, or former slugs; active first, then priority.
+    # Partial match on slug, name, or former slugs; active first, then highest priority.
     needle = _norm(ref)
     if not needle:
         return None
     rows = conn.execute(
-        f"SELECT * FROM tasks WHERE parent_id IS NULL ORDER BY {_STATE_ORDER}, priority, id"
+        f"SELECT * FROM tasks WHERE parent_id IS NULL ORDER BY {_STATE_ORDER}, priority DESC, id"
     ).fetchall()
     for r in rows:
         if needle in _norm(r["slug"]) or needle in _norm(r["name"]):
@@ -360,7 +377,7 @@ def _find_row(conn, ref: str):
     alias = conn.execute(
         "SELECT t.* FROM task_aliases a JOIN tasks t ON t.id = a.task_id "
         "WHERE t.parent_id IS NULL AND a.slug LIKE ? "
-        f"ORDER BY {_STATE_ORDER}, t.priority, t.id LIMIT 1",
+        f"ORDER BY {_STATE_ORDER}, t.priority DESC, t.id LIMIT 1",
         (f"%{needle.replace(' ', '-')}%",),
     ).fetchone()
     return alias
@@ -396,7 +413,7 @@ def _find_subtasks(conn, parent_id: int, ref: str, states=SUBTASK_STATES) -> lis
         raise ToledoError("subtask is required")
     marks = ",".join("?" * len(states))
     rows = conn.execute(
-        f"SELECT * FROM tasks WHERE parent_id = ? AND state IN ({marks}) ORDER BY priority, id",
+        f"SELECT * FROM tasks WHERE parent_id = ? AND state IN ({marks}) ORDER BY priority DESC, id",
         (parent_id, *states),
     ).fetchall()
     exact = [r for r in rows if r["slug"] == ref.lower()]
@@ -436,7 +453,7 @@ def list_tasks(states=None, project: str | None = None) -> list[dict]:
     if project:
         sql += " AND project = ?"
         params.append(project.upper())
-    sql += f" ORDER BY {_STATE_ORDER}, priority, id"
+    sql += f" ORDER BY {_STATE_ORDER}, priority DESC, id"
     with connect() as c:
         return _dicts(c, c.execute(sql, params).fetchall())
 
@@ -446,7 +463,7 @@ def upcoming(days: int = 7) -> list[dict]:
     with connect() as c:
         rows = c.execute(
             "SELECT * FROM tasks WHERE parent_id IS NULL AND state = 'active' "
-            "AND due IS NOT NULL AND due <= ? ORDER BY due, priority",
+            "AND due IS NOT NULL AND due <= ? ORDER BY due, priority DESC",
             (cutoff,),
         ).fetchall()
         return _dicts(c, rows)
@@ -462,7 +479,7 @@ def search(query: str) -> list[dict]:
     like = f"%{q}%"
     with connect() as c:
         rows = c.execute(
-            f"SELECT * FROM tasks WHERE parent_id IS NULL ORDER BY {_STATE_ORDER}, priority, id"
+            f"SELECT * FROM tasks WHERE parent_id IS NULL ORDER BY {_STATE_ORDER}, priority DESC, id"
         ).fetchall()
         noted = {
             r["task_id"] for r in c.execute(
@@ -1028,8 +1045,9 @@ def main():
         conn = _open(target)
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
-        conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '1')")
         counts = migrate_from_files(conn, Path(args.tasks_dir), Path(args.context_file))
+        _upgrade(conn)
         conn.commit()
         conn.close()
         print(f"✓ Migrated {args.tasks_dir} → {target}: {counts}")

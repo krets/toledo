@@ -27,12 +27,12 @@ import toledo_db as db
 
 def pri_label(n: int) -> str:
     n = int(n)
-    if n <= 24:  return "Ultra High"
-    if n == 25:  return "High"
-    if n <= 49:  return "Med-High"
+    if n >= 76:  return "Ultra High"
+    if n == 75:  return "High"
+    if n >= 51:  return "Med-High"
     if n == 50:  return "Medium"
-    if n <= 74:  return "Med-Low"
-    if n == 75:  return "Low"
+    if n >= 26:  return "Med-Low"
+    if n == 25:  return "Low"
     return "Very Low"
 
 
@@ -115,6 +115,7 @@ def err(text: str) -> list[types.TextContent]:
 # every session, and the prompts themselves are fetched on demand.
 SERVER_INSTRUCTIONS = """\
 Toledo is the user's task manager. Tasks are addressed by partial name or slug.
+Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low).
 
 Toledo ships guided-session prompts:
 - morning_planning: start-of-day "what should I work on" session
@@ -180,7 +181,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "name":        {"type": "string", "description": "Task name"},
                     "project":     {"type": "string", "description": "Project code (e.g. JOB). Defaults to GEN"},
-                    "priority":    {"type": "integer", "description": "Priority 1–99 (lower = higher priority). Default 50"},
+                    "priority":    {"type": "integer", "description": "Priority 1–99 (higher = more important). Default 50"},
                     "due":         {"type": "string", "description": "Due date YYYY-MM-DD"},
                     "recurrence":  {"type": "integer", "description": "Repeat every N days"},
                     "description": {"type": "string", "description": "Task description (Markdown)"},
@@ -241,7 +242,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="reprioritize_task",
-            description="Change a task's priority (1–99, lower = more urgent).",
+            description="Change a task's priority (1–99, higher = more important).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -322,7 +323,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "task":     {"type": "string", "description": "Parent task (partial name or slug)"},
                     "name":     {"type": "string"},
-                    "priority": {"type": "integer", "default": 50},
+                    "priority": {"type": "integer", "default": 50, "description": "1–99, higher = more important"},
                     "due":      {"type": "string", "description": "YYYY-MM-DD"},
                 },
                 "required": ["task", "name"],

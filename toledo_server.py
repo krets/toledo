@@ -96,7 +96,7 @@ def list_tasks():
         states = [state_filter]
 
     tasks = [task_to_dict(d) for d in db.list_tasks(states, project_filter)]
-    tasks.sort(key=lambda x: (x["priority"], x["due"] or "9999"))
+    tasks.sort(key=lambda x: (-x["priority"], x["due"] or "9999"))
     return jsonify(tasks)
 
 
@@ -342,12 +342,12 @@ def get_status():
 {tasks_md}
 
 ## PRIORITY SYSTEM
-Toledo uses a "lower is higher" numerical priority system:
-- **00-24**: Ultra High
-- **25**: High
+Priority is a number from 1 to 99; higher is more important:
+- **76-99**: Ultra High
+- **75**: High
 - **50**: Medium
-- **75**: Low
-- **99+**: Very Low
+- **25**: Low
+- **1-24**: Very Low
 
 ## AVAILABLE OPERATIONS
 You can ask the Toledo AI to perform the following actions. When responding, provide a concise list of these operations that the user can paste into the Toledo chat bubble:
@@ -584,7 +584,7 @@ CHATTABLE_TOOLS = [
                 "properties": {
                     "name": {"type": "string"},
                     "project": {"type": "string", "description": "Project code, default GEN"},
-                    "priority": {"type": "integer", "description": "1-99, default 50"},
+                    "priority": {"type": "integer", "description": "1-99, higher = more important, default 50"},
                     "due": {"type": "string", "description": "YYYY-MM-DD"},
                     "recur": {"type": "integer", "description": "Days for recurrence"}
                 },
@@ -661,7 +661,7 @@ CHATTABLE_TOOLS = [
                 "properties": {
                     "task": {"type": "string", "description": "Parent task name/slug"},
                     "name": {"type": "string", "description": "Subtask name"},
-                    "priority": {"type": "integer", "default": 50},
+                    "priority": {"type": "integer", "default": 50, "description": "1-99, higher = more important"},
                     "due": {"type": "string", "description": "YYYY-MM-DD"}
                 },
                 "required": ["task", "name"]
@@ -843,13 +843,12 @@ TASK CONTEXT (current state):
 
 INSTRUCTIONS:
 1. Help the user manage their tasks using the provided tools.
-2. PRIORITY SYSTEM: Toledo uses a "lower is higher" priority system.
-   - 0-24: Ultra High
-   - 25: High
+2. PRIORITY SYSTEM: priority is 1-99, and higher numbers are more important.
+   - 76-99: Ultra High
+   - 75: High
    - 50: Medium
-   - 75: Low
-   - 100+: Very Low
-   - When the user asks for "high priority" tasks, look for those with the LOWEST numerical values.
+   - 25: Low
+   - 1-24: Very Low
 3. When creating a task, use the PROJECT CONTEXT to find the most appropriate project code.
    - If the user mentions a project by name (e.g., "General", "Work"), map it to the corresponding code (e.g., "GEN", "JOB").
    - If the user's request implies a project (e.g., "misc", "random"), use your best judgment to map it to an existing project like "GEN".

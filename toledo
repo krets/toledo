@@ -534,7 +534,7 @@ def main():
 
     pn = s.add_parser("new", help="Create a task")
     pn.add_argument("name")
-    pn.add_argument("-p", "--priority", type=int)
+    pn.add_argument("-p", "--priority", type=int, help="1–99, higher = more important (default 50)")
     pn.add_argument("-c", "--project")
     pn.add_argument("-d", "--description")
     pn.add_argument("--due", metavar="YYYY-MM-DD")
@@ -564,7 +564,7 @@ def main():
 
     pre = s.add_parser("reprioritize", aliases=["pri"], help="Change priority")
     pre.add_argument("task")
-    pre.add_argument("priority", type=int)
+    pre.add_argument("priority", type=int, help="1–99, higher = more important")
 
     prp = s.add_parser("reproject", help="Move a task to another project")
     prp.add_argument("task")
@@ -589,7 +589,7 @@ def main():
     psub = s.add_parser("sub", help="Add a subtask")
     psub.add_argument("name")
     psub.add_argument("-t", "--task")
-    psub.add_argument("-p", "--priority", type=int)
+    psub.add_argument("-p", "--priority", type=int, help="1–99, higher = more important")
     psub.add_argument("--due", metavar="YYYY-MM-DD")
 
     psd = s.add_parser("subdone", help="Complete a subtask")
