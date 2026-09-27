@@ -12,12 +12,7 @@ Claude config:
 
 import argparse
 import contextlib
-import importlib.machinery
-import importlib.util
-import json
-import re
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import mcp.types as types
 import uvicorn
@@ -26,12 +21,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.routing import Route
 
-# ── Load toledo module (no .py extension) ─────────────────────────────────────
-_path   = str(Path(__file__).parent / "toledo")
-_loader = importlib.machinery.SourceFileLoader("toledo", _path)
-_spec   = importlib.util.spec_from_loader("toledo", _loader, origin=_path)
-t       = importlib.util.module_from_spec(_spec)
-_loader.exec_module(t)
+import toledo_db as db
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -46,75 +36,12 @@ def pri_label(n: int) -> str:
     return "Very Low"
 
 
-def proj_name(code: str) -> str:
-    projects = t.load_projects()
-    val = projects.get(code)
-    if isinstance(val, dict):
-        return val.get("name", code)
-    return str(val) if val else code
-
-
-def last_updated(folder: Path) -> str | None:
-    """ISO timestamp of the most recent activity.log entry, falling back to mtime."""
-    log_f = folder / "activity.log"
-    if log_f.exists():
-        ts = None
-        for line in log_f.read_text().splitlines():
-            try:
-                ts = json.loads(line).get("ts", ts)
-            except Exception:
-                pass
-        if ts:
-            return ts
-    try:
-        return datetime.fromtimestamp(folder.stat().st_mtime).isoformat()
-    except Exception:
-        return None
-
-
-def task_to_dict(folder: Path, state: str, detail: bool = False) -> dict:
-    info = t.parse_task_slug(folder.name)
-    df = folder / "due.txt"
-    rf = folder / "recurrence.txt"
-    result = {
-        "slug":        folder.name,
-        "state":       state,
-        "priority":    info["priority"],
-        "pri_label":   pri_label(info["priority"]),
-        "project":     info["project"],
-        "project_name": proj_name(info["project"]),
-        "name":        info["name"],
-        "due":         df.read_text().strip() if df.exists() else None,
-        "recurrence":  int(rf.read_text().strip()) if rf.exists() else None,
-        "overdue":     t.is_overdue(folder),
-        "updated":     last_updated(folder),
-    }
-    if detail:
-        desc_f = folder / "description.md"
-        wlog_f = folder / "worklog.md"
-        log_f  = folder / "activity.log"
-        result["description"] = desc_f.read_text() if desc_f.exists() else ""
-        result["worklog"]     = wlog_f.read_text()  if wlog_f.exists() else ""
-        subtasks = []
-        for ss in t.SUBTASK_STATES:
-            sub_dir = folder / "subtasks" / ss
-            if sub_dir.exists():
-                for sub in sorted(sub_dir.iterdir()):
-                    if sub.is_dir():
-                        si = t.parse_task_slug(sub.name)
-                        subtasks.append({
-                            "slug":  sub.name,
-                            "name":  si["name"],
-                            "state": ss,
-                        })
-        result["subtasks"] = subtasks
-        if log_f.exists():
-            entries = []
-            for line in log_f.read_text().splitlines():
-                try:    entries.append(json.loads(line))
-                except: pass
-            result["activity"] = entries
-    return result
+def decorate(d: dict, projects: dict | None = None) -> dict:
+    """Add display fields (priority label, project name) to a store task dict."""
+    projects = projects if projects is not None else db.list_projects()
+    d["pri_label"] = pri_label(d["priority"])
+    d["project_name"] = projects.get(d["project"], {}).get("name", d["project"])
+    return d
 
 
 def fmt_task_line(d: dict) -> str:
@@ -158,9 +85,9 @@ def fmt_task_detail(d: dict) -> str:
         lines.append("\n## Description")
         lines.append(d["description"].strip())
 
-    if d.get("worklog", "").strip():
+    if d.get("notes"):
         lines.append("\n## Notes")
-        lines.append(d["worklog"].strip())
+        lines.append(db.render_worklog(d["notes"]).strip())
 
     if d.get("activity"):
         lines.append("\n## Recent Activity")
@@ -172,72 +99,6 @@ def fmt_task_detail(d: dict) -> str:
             lines.append(f"  {ts}  {action}{extra}")
 
     return "\n".join(lines)
-
-
-def _rename_project_code(old_code: str, new_code: str) -> int:
-    """Rename a project's code across every task/subtask slug that uses it.
-    Raises before changing anything if the rename would collide with an
-    existing slug. Returns the number of top-level tasks moved."""
-
-    def slug_for(info: dict, new_project: str) -> str:
-        return f"{info['priority']:02d}-{new_project}-{info['name'].replace(' ', '-')}"
-
-    task_moves: list[tuple[Path, Path]] = []
-    subtask_moves: list[tuple[Path, Path]] = []
-    seen: set[Path] = set()
-
-    def plan(folder: Path, new_folder: Path, bucket: list) -> None:
-        if new_folder.exists() or new_folder in seen:
-            raise ValueError(f"Cannot rename: '{new_folder.name}' already exists")
-        seen.add(new_folder)
-        bucket.append((folder, new_folder))
-
-    for state in t.STATES:
-        sd = t.get_tasks_dir() / state
-        if not sd.exists():
-            continue
-        for folder in sorted(sd.iterdir()):
-            if not folder.is_dir():
-                continue
-            info = t.parse_task_slug(folder.name)
-            if info["project"] == old_code:
-                plan(folder, sd / slug_for(info, new_code), task_moves)
-            for ss in t.SUBTASK_STATES:
-                sub_dir = folder / "subtasks" / ss
-                if not sub_dir.exists():
-                    continue
-                for sub in sorted(sub_dir.iterdir()):
-                    if not sub.is_dir():
-                        continue
-                    sinfo = t.parse_task_slug(sub.name)
-                    if sinfo["project"] == old_code:
-                        plan(sub, sub_dir / slug_for(sinfo, new_code), subtask_moves)
-
-    # Subtasks first, while their parent folder is still at its original path.
-    for sub, new_sub in subtask_moves:
-        sub.rename(new_sub)
-    for folder, new_folder in task_moves:
-        folder.rename(new_folder)
-        if t.get_context() == folder.name:
-            t.set_context(new_folder.name)
-        t.append_log(new_folder, "project_renamed", old_project=old_code, new_project=new_code)
-
-    return len(task_moves)
-
-
-def resolve_task(partial: str):
-    """Return (folder, state) or raise ValueError."""
-    r = t.find_task(partial)
-    if not r:
-        raise ValueError(f"No task matching '{partial}'")
-    return r
-
-
-def _append_note(folder: Path, note: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    with open(folder / "worklog.md", "a") as f:
-        f.write(f"\n### {ts}\n{note}\n")
-    t.append_log(folder, "note_added")
 
 
 def ok(text: str) -> list[types.TextContent]:
@@ -556,8 +417,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="rename_project",
             description=(
-                "Rename a project's code (e.g. PRJ -> WORK), updating projects.json and "
-                "every task/subtask slug that uses it in one operation. Fails without "
+                "Rename a project's code (e.g. PRJ -> WORK), carrying every task and "
+                "subtask in it along in one operation. Fails without "
                 "changing anything if the new code already exists as a distinct project "
                 "— use merge_projects for that case instead."
             ),
@@ -683,6 +544,9 @@ def _normalize_args(name: str, args: dict) -> dict:
     for alias, canonical in aliases.items():
         if alias in out and canonical not in out:
             out[canonical] = out.pop(alias)
+    # A bare integer task reference is a task id.
+    if isinstance(out.get("task"), int) and not isinstance(out["task"], bool):
+        out["task"] = f"#{out['task']}"
     return out
 
 
@@ -713,16 +577,14 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         project_filter = (args.get("project") or "").upper() or None
         sort           = args.get("sort", "default")
         updated_within = args.get("updated_within_days")
-        states = t.STATES if state_filter == "all" else [state_filter]
+        if state_filter != "all" and state_filter not in db.STATES:
+            raise ValueError(f"Invalid state '{state_filter}'")
+        states   = db.STATES if state_filter == "all" else [state_filter]
+        projects = db.list_projects()
+        all_tasks = [decorate(d, projects) for d in db.list_tasks(states, project_filter)]
         lines  = []
         for state in states:
-            sd = t.get_tasks_dir() / state
-            if not sd.exists():
-                continue
-            tasks = [f for f in sorted(sd.iterdir()) if f.is_dir()]
-            if project_filter:
-                tasks = [f for f in tasks if t.parse_task_slug(f.name)["project"] == project_filter]
-            dicts = [task_to_dict(f, state) for f in tasks]
+            dicts = [d for d in all_tasks if d["state"] == state]
             if updated_within is not None:
                 cutoff = (datetime.now() - timedelta(days=int(updated_within))).isoformat()
                 dicts = [d for d in dicts if d["updated"] and d["updated"] >= cutoff]
@@ -740,307 +602,111 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
 
     # ── get_task ──────────────────────────────────────────────────────────────
     if name == "get_task":
-        folder, state = resolve_task(args["task"])
-        return ok(fmt_task_detail(task_to_dict(folder, state, detail=True)))
+        return ok(fmt_task_detail(decorate(db.get_task(args["task"]))))
 
     # ── create_task ───────────────────────────────────────────────────────────
     if name == "create_task":
         task_name = args["name"].strip()
-        if not task_name:
-            raise ValueError("name is required")
-        priority = int(args.get("priority") or 50)
-        project  = (args.get("project") or "GEN").upper()
-        due      = args.get("due") or None
-        recur    = args.get("recurrence") or None
-        desc     = args.get("description") or None
-        slug     = t.make_task_slug(priority, project, task_name)
-        folder   = t.get_tasks_dir() / "active" / slug
-        if folder.exists():
-            raise ValueError(f"Task '{slug}' already exists")
-        t.ensure_dir(folder)
-        (folder / "description.md").write_text(
-            desc if desc else f"# {task_name}\n\n_No description._\n"
+        d = db.create_task(
+            task_name,
+            project=args.get("project"),
+            priority=args.get("priority"),
+            due=args.get("due") or None,
+            recurrence=args.get("recurrence") or None,
+            description=args.get("description") or f"# {task_name}\n\n_No description._\n",
         )
-        if due:
-            (folder / "due.txt").write_text(due)
-        if recur:
-            (folder / "recurrence.txt").write_text(str(recur))
-        t.append_log(folder, "created", state="active", priority=priority, project=project)
-        return ok(f"Created: {slug}")
+        return ok(f"Created: {d['slug']}")
 
     # ── done_task ─────────────────────────────────────────────────────────────
     if name == "done_task":
-        folder, state = resolve_task(args["task"])
-        closing_note = (args.get("note") or "").strip()
-        rf = folder / "recurrence.txt"
-        if rf.exists():
-            # Recurring: advance due date
-            period = int(rf.read_text().strip())
-            df = folder / "due.txt"
-            if df.exists():
-                from_date = datetime.strptime(df.read_text().strip(), "%Y-%m-%d")
-            else:
-                from_date = datetime.now()
-            next_due = (from_date + timedelta(days=period)).strftime("%Y-%m-%d")
-            df.write_text(next_due)
-            t.append_log(folder, "done_recurring", next_due=next_due)
-            if closing_note:
-                _append_note(folder, closing_note)
-            return ok(f"↻ Recurring task advanced. Next due: {next_due}")
-        else:
-            dst = t.get_tasks_dir() / "completed" / folder.name
-            t.ensure_dir(dst.parent)
-            folder.rename(dst)
-            if t.get_context() == folder.name:
-                t.set_context("")
-            t.append_log(dst, "completed")
-            if closing_note:
-                _append_note(dst, closing_note)
-            return ok(f"✓ Completed: {folder.name}")
+        r = db.complete_task(args["task"], note=args.get("note"))
+        if r["recurring"]:
+            return ok(f"↻ Recurring task advanced. Next due: {r['next_due']}")
+        return ok(f"✓ Completed: {r['task']['slug']}")
 
     # ── move_task ─────────────────────────────────────────────────────────────
     if name == "move_task":
-        folder, cur_state = resolve_task(args["task"])
         to_state = args["state"]
-        if to_state not in t.STATES:
-            raise ValueError(f"Invalid state '{to_state}'")
-        if cur_state == to_state:
+        if db.resolve_task(args["task"])["state"] == to_state:
             return ok(f"Already in '{to_state}'")
-        dst = t.get_tasks_dir() / to_state / folder.name
-        t.ensure_dir(dst.parent)
-        folder.rename(dst)
-        if t.get_context() == folder.name:
-            t.set_context("")
-        t.append_log(dst, "state_changed", from_state=cur_state, to_state=to_state)
-        return ok(f"→ Moved '{folder.name}' to {to_state}")
+        d = db.move_task(args["task"], to_state)
+        return ok(f"→ Moved '{d['slug']}' to {to_state}")
 
     # ── delete_task ───────────────────────────────────────────────────────────
     if name == "delete_task":
-        import shutil
-        folder, _ = resolve_task(args["task"])
-        name_str = folder.name
-        shutil.rmtree(folder)
-        if t.get_context() == name_str:
-            t.set_context("")
-        return ok(f"🗑 Deleted: {name_str}")
+        d = db.delete_task(args["task"])
+        return ok(f"🗑 Deleted: {d['slug']}")
 
     # ── rename_task ───────────────────────────────────────────────────────────
     if name == "rename_task":
-        folder, state = resolve_task(args["task"])
-        new_name = args["name"].strip()
-        old_info = t.parse_task_slug(folder.name)
-        new_slug = re.sub(r"[^a-z0-9]+", "-", new_name.lower()).strip("-")
-        new_slug = f"{old_info['priority']:02d}-{old_info['project']}-{new_slug}"
-        new_folder = t.get_tasks_dir() / state / new_slug
-        if new_folder.exists():
-            raise ValueError(f"Slug '{new_slug}' already exists")
-        folder.rename(new_folder)
-        if t.get_context() == folder.name:
-            t.set_context(new_slug)
-        t.append_log(new_folder, "renamed", old=old_info["name"], new=new_name)
-        return ok(f"Renamed → {new_slug}")
+        d = db.rename_task(args["task"], args["name"])
+        return ok(f"Renamed → {d['name']}  [{d['slug']}]")
 
     # ── reprioritize_task ─────────────────────────────────────────────────────
     if name == "reprioritize_task":
-        folder, state = resolve_task(args["task"])
-        new_pri  = int(args["priority"])
-        old_info = t.parse_task_slug(folder.name)
-        new_slug = f"{new_pri:02d}-{old_info['project']}-{old_info['name'].replace(' ', '-')}"
-        new_folder = t.get_tasks_dir() / state / new_slug
-        if new_folder.exists():
-            raise ValueError(f"Slug '{new_slug}' already exists")
-        folder.rename(new_folder)
-        if t.get_context() == folder.name:
-            t.set_context(new_slug)
-        t.append_log(new_folder, "reprioritized",
-                     old_priority=old_info["priority"], new_priority=new_pri)
-        return ok(f"Priority → {new_pri} ({pri_label(new_pri)})  [{new_slug}]")
+        d = db.set_priority(args["task"], args["priority"])
+        return ok(f"Priority → {d['priority']} ({pri_label(d['priority'])})  [{d['slug']}]")
 
     # ── reproject_task ────────────────────────────────────────────────────────
     if name == "reproject_task":
-        folder, state = resolve_task(args["task"])
-        new_proj = args["project"].upper()
-        old_info = t.parse_task_slug(folder.name)
-        new_slug = f"{old_info['priority']:02d}-{new_proj}-{old_info['name'].replace(' ', '-')}"
-        new_folder = t.get_tasks_dir() / state / new_slug
-        if new_folder.exists():
-            raise ValueError(f"Slug '{new_slug}' already exists")
-        folder.rename(new_folder)
-        if t.get_context() == folder.name:
-            t.set_context(new_slug)
-        t.append_log(new_folder, "reprojected",
-                     old_project=old_info["project"], new_project=new_proj)
-        return ok(f"Project → {new_proj} ({proj_name(new_proj)})  [{new_slug}]")
+        d = db.set_project(args["task"], args["project"])
+        return ok(f"Project → {d['project']} ({db.project_name(d['project'])})  [{d['slug']}]")
 
     # ── set_due ───────────────────────────────────────────────────────────────
     if name == "set_due":
-        folder, _ = resolve_task(args["task"])
-        date = (args.get("due") or "").strip()
-        df = folder / "due.txt"
-        if date:
-            df.write_text(date)
-            t.append_log(folder, "due_set", date=date)
-            return ok(f"Due date set to {date}")
-        else:
-            if df.exists():
-                df.unlink()
-                t.append_log(folder, "due_cleared")
-            return ok("Due date cleared")
+        d = db.set_due(args["task"], args.get("due"))
+        return ok(f"Due date set to {d['due']}" if d["due"] else "Due date cleared")
 
     # ── set_recurrence ────────────────────────────────────────────────────────
     if name == "set_recurrence":
-        folder, _ = resolve_task(args["task"])
-        interval = int(args.get("interval") or 0)
-        if interval < 0:
-            raise ValueError("interval must be 0 or a positive number of days")
-        rf = folder / "recurrence.txt"
-        if interval:
-            rf.write_text(str(interval))
-            t.append_log(folder, "recurrence_set", interval=interval)
-            return ok(f"Recurrence set to every {interval} days")
-        else:
-            if rf.exists():
-                rf.unlink()
-                t.append_log(folder, "recurrence_cleared")
-            return ok("Recurrence cleared")
+        d = db.set_recurrence(args["task"], args.get("interval"))
+        if d["recurrence"]:
+            return ok(f"Recurrence set to every {d['recurrence']} days")
+        return ok("Recurrence cleared")
 
     # ── add_note ──────────────────────────────────────────────────────────────
     if name == "add_note":
-        folder, _ = resolve_task(args["task"])
-        note = args["note"].strip()
-        if not note:
-            raise ValueError("note text is required")
-        _append_note(folder, note)
-        return ok(f"Note added to {folder.name}")
+        d = db.add_note(args["task"], args["note"])
+        return ok(f"Note added to {d['slug']}")
 
     # ── update_description ────────────────────────────────────────────────────
     if name == "update_description":
-        folder, _ = resolve_task(args["task"])
-        text = args.get("description", "")
-        df = folder / "description.md"
-        # Archive old version
-        if df.exists():
-            ad = folder / "description_archive"
-            t.ensure_dir(ad)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            df.rename(ad / f"description_{ts}.md")
-        df.write_text(text)
-        t.append_log(folder, "description_updated")
-        return ok(f"Description updated for {folder.name}")
+        d = db.set_description(args["task"], args.get("description", ""))
+        return ok(f"Description updated for {d['slug']}")
 
     # ── add_subtask ───────────────────────────────────────────────────────────
     if name == "add_subtask":
-        folder, _ = resolve_task(args["task"])
-        sub_name = args["name"].strip()
-        if not sub_name:
-            raise ValueError("subtask name is required")
-        priority    = int(args.get("priority") or 50)
-        parent_proj = t.parse_task_slug(folder.name)["project"]
-        name_slug   = re.sub(r"[^a-z0-9]+", "-", sub_name.lower()).strip("-")
-        sub_slug    = f"{priority:02d}-{parent_proj}-{name_slug}"
-        sf = folder / "subtasks" / "active" / sub_slug
-        t.ensure_dir(sf)
-        (sf / "description.md").write_text(f"# {sub_name}\n\n_No description._\n")
-        if args.get("due"):
-            (sf / "due.txt").write_text(args["due"])
-        t.append_log(folder, "subtask_created", subtask=sub_slug)
-        return ok(f"Subtask created: {sub_slug}")
+        s = db.add_subtask(args["task"], args["name"],
+                           priority=args.get("priority"), due=args.get("due"))
+        return ok(f"Subtask created: {s['slug']}")
 
     # ── done_subtask ──────────────────────────────────────────────────────────
     if name == "done_subtask":
-        folder, _ = resolve_task(args["task"])
-        partial   = args["subtask"].lower()
-        active_dir = folder / "subtasks" / "active"
-        if not active_dir.exists():
-            raise ValueError("No active subtasks")
-        match = None
-        for sub in active_dir.iterdir():
-            if sub.is_dir() and partial in sub.name.lower():
-                match = sub; break
-        if not match:
-            raise ValueError(f"No active subtask matching '{partial}'")
-        dst_dir = folder / "subtasks" / "completed"
-        t.ensure_dir(dst_dir)
-        dst = dst_dir / match.name
-        if dst.exists():
-            n = 2
-            while (dst_dir / f"{match.name}-{n}").exists():
-                n += 1
-            dst = dst_dir / f"{match.name}-{n}"
-        match.rename(dst)
-        t.append_log(folder, "subtask_completed", subtask=match.name)
-        return ok(f"✓ Subtask done: {match.name}")
+        s = db.set_subtask_state(args["task"], args["subtask"], "completed", first_match=True)
+        return ok(f"✓ Subtask done: {s['slug']}")
 
     # ── delete_subtask ────────────────────────────────────────────────────────
     if name == "delete_subtask":
-        import shutil
-        folder, _ = resolve_task(args["task"])
-        partial   = args["subtask"].strip().lower()
-        if not partial:
-            raise ValueError("subtask is required")
-        candidates = [
-            (ss, sub)
-            for ss in t.SUBTASK_STATES
-            if (folder / "subtasks" / ss).exists()
-            for sub in sorted((folder / "subtasks" / ss).iterdir())
-            if sub.is_dir()
-        ]
-        matches = [c for c in candidates if c[1].name.lower() == partial]
-        if not matches:
-            matches = [c for c in candidates if partial in c[1].name.lower()]
-        if not matches:
-            raise ValueError(f"No subtask matching '{partial}'")
-        if len(matches) > 1:
-            names = ", ".join(f"{sub.name} ({ss})" for ss, sub in matches)
-            raise ValueError(f"'{partial}' is ambiguous — matches: {names}")
-        ss, sub = matches[0]
-        shutil.rmtree(sub)
-        t.append_log(folder, "subtask_deleted", subtask=sub.name, state=ss)
-        return ok(f"🗑 Deleted subtask: {sub.name} ({ss})")
+        s = db.delete_subtask(args["task"], args["subtask"])
+        return ok(f"🗑 Deleted subtask: {s['slug']} ({s['state']})")
 
     # ── search_tasks ──────────────────────────────────────────────────────────
     if name == "search_tasks":
-        query = args["query"].lower()
-        query_norm = query.replace("-", " ")
-        results = []
-        for state in t.STATES:
-            sd = t.get_tasks_dir() / state
-            if not sd.exists():
-                continue
-            for folder in sorted(sd.iterdir()):
-                if not folder.is_dir():
-                    continue
-                hits = []
-                name_norm = folder.name.lower().replace("-", " ")
-                if query in folder.name.lower() or query_norm in name_norm:
-                    hits.append("name")
-                for fname in ("description.md", "worklog.md"):
-                    f = folder / fname
-                    if f.exists() and query in f.read_text().lower():
-                        hits.append(fname)
-                if hits:
-                    d = task_to_dict(folder, state)
-                    results.append(f"[{state}] {fmt_task_line(d)}  (matched: {', '.join(hits)})")
+        query = args["query"]
+        projects = db.list_projects()
+        results = [
+            f"[{d['state']}] {fmt_task_line(decorate(d, projects))}  (matched: {', '.join(d['hits'])})"
+            for d in db.search(query)
+        ]
         if not results:
             return ok(f"No tasks match '{query}'")
         return ok(f"Results for '{query}':\n\n" + "\n".join(results))
 
     # ── upcoming_tasks ────────────────────────────────────────────────────────
     if name == "upcoming_tasks":
-        days   = int(args.get("days") or 7)
-        cutoff = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
-        results = []
-        sd = t.get_tasks_dir() / "active"
-        if sd.exists():
-            for folder in sorted(sd.iterdir()):
-                if not folder.is_dir():
-                    continue
-                df = folder / "due.txt"
-                if not df.exists():
-                    continue
-                if df.read_text().strip() <= cutoff:
-                    results.append(task_to_dict(folder, "active"))
-        results.sort(key=lambda x: x["due"] or "9999")
+        days = int(args.get("days") if args.get("days") is not None else 7)
+        projects = db.list_projects()
+        results = [decorate(d, projects) for d in db.upcoming(days)]
         if not results:
             return ok(f"No tasks due within {days} days.")
         lines = [fmt_task_line(d) for d in results]
@@ -1049,26 +715,21 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
 
     # ── get_status ────────────────────────────────────────────────────────────
     if name == "get_status":
-        projects = t.load_projects()
+        projects = db.list_projects()
+        all_tasks = [decorate(d, projects) for d in db.list_tasks()]
         lines    = [f"Toledo Status — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"]
-        for state in ["active", "completed", "archive"]:
-            sd = t.get_tasks_dir() / state
-            if not sd.exists():
-                continue
-            tasks = [f for f in sorted(sd.iterdir()) if f.is_dir()]
+        for state in db.STATES:
+            tasks = [d for d in all_tasks if d["state"] == state]
             if not tasks:
                 continue
             lines.append(f"── {state.upper()} ({len(tasks)}) ──")
             # Group by project
             by_proj: dict[str, list] = {}
-            for f in tasks:
-                info = t.parse_task_slug(f.name)
-                by_proj.setdefault(info["project"], []).append(f)
+            for d in tasks:
+                by_proj.setdefault(d["project"], []).append(d)
             for proj_code, proj_tasks in sorted(by_proj.items()):
-                pname = proj_name(proj_code)
-                lines.append(f"  {pname} ({proj_code}) — {len(proj_tasks)} task(s)")
-                for f in proj_tasks:
-                    d   = task_to_dict(f, state)
+                lines.append(f"  {proj_tasks[0]['project_name']} ({proj_code}) — {len(proj_tasks)} task(s)")
+                for d in proj_tasks:
                     due = f"  due:{('⚠' if d['overdue'] else '')}{d['due']}" if d["due"] else ""
                     lines.append(f"    • {d['name']}{due}")
             lines.append("")
@@ -1076,18 +737,13 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
 
     # ── list_projects ─────────────────────────────────────────────────────────
     if name == "list_projects":
-        projects = t.load_projects()
+        projects = db.list_projects()
         if not projects:
             return ok("No projects defined.")
         lines = [f"{'CODE':<8}  {'NAME':<20}  COLOR"]
         lines.append("-" * 40)
         for code, val in sorted(projects.items()):
-            if isinstance(val, dict):
-                pname  = val.get("name", "")
-                pcolor = val.get("color", "(none)")
-            else:
-                pname, pcolor = str(val), "(none)"
-            lines.append(f"{code:<8}  {pname:<20}  {pcolor}")
+            lines.append(f"{code:<8}  {val['name']:<20}  {val['color']}")
         return ok("\n".join(lines))
 
     # ── add_project ───────────────────────────────────────────────────────────
@@ -1095,68 +751,34 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         code  = args["code"].upper().strip()
         pname = args["name"].strip()
         color = args.get("color") or ""
-        if not code or not pname:
-            raise ValueError("code and name are required")
-        projects = t.load_projects()
-        projects[code] = {"name": pname, "color": color}
-        t.save_projects(projects)
+        db.save_project(code, pname, color)
         return ok(f"✓ Project '{code}' = '{pname}'" + (f"  {color}" if color else ""))
 
     # ── remove_project ────────────────────────────────────────────────────────
     if name == "remove_project":
         code = args["code"].upper().strip()
-        projects = t.load_projects()
-        if code not in projects:
-            raise ValueError(f"Project '{code}' not found")
-        del projects[code]
-        t.save_projects(projects)
+        db.remove_project(code)
         return ok(f"Removed project '{code}'")
 
     # ── rename_project ────────────────────────────────────────────────────────
     if name == "rename_project":
         old_code = args["old_code"].upper().strip()
         new_code = args["new_code"].upper().strip()
-        if not old_code or not new_code:
-            raise ValueError("old_code and new_code are required")
-        if old_code == new_code:
-            raise ValueError("old_code and new_code are the same")
-        projects = t.load_projects()
-        if old_code not in projects:
-            raise ValueError(f"Project '{old_code}' not found")
-        if new_code in projects:
-            raise ValueError(f"Project '{new_code}' already exists — use merge_projects instead")
-        count = _rename_project_code(old_code, new_code)
-        projects[new_code] = projects.pop(old_code)
-        t.save_projects(projects)
+        count = db.rename_project(old_code, new_code)
         return ok(f"Renamed project '{old_code}' → '{new_code}' ({count} task(s) updated)")
 
     # ── merge_projects ────────────────────────────────────────────────────────
     if name == "merge_projects":
         from_code = args["from_code"].upper().strip()
         into_code = args["into_code"].upper().strip()
-        if not from_code or not into_code:
-            raise ValueError("from_code and into_code are required")
-        if from_code == into_code:
-            raise ValueError("from_code and into_code are the same")
-        projects = t.load_projects()
-        if from_code not in projects:
-            raise ValueError(f"Project '{from_code}' not found")
-        if into_code not in projects:
-            raise ValueError(f"Project '{into_code}' not found — create it first with add_project")
-        count = _rename_project_code(from_code, into_code)
-        del projects[from_code]
-        t.save_projects(projects)
+        count = db.merge_projects(from_code, into_code)
         return ok(f"Merged '{from_code}' into '{into_code}' ({count} task(s) moved), removed '{from_code}'")
 
     # ── update_glossary ───────────────────────────────────────────────────────
     if name == "update_glossary":
         term      = args["term"].strip()
         canonical = args["canonical"].strip()
-        if not term or not canonical:
-            raise ValueError("term and canonical are required")
-        glossary = t.load_glossary()
-        glossary[term.lower()] = canonical
-        t.save_glossary(glossary)
+        db.set_glossary_term(term, canonical)
         return ok(f"Glossary: '{term}' → '{canonical}'")
 
     # ── list_resources / get_resource (tool mirrors of the resources capability) ─
@@ -1235,7 +857,7 @@ async def read_resource(uri: types.AnyUrl) -> str:
         return result[0].text
 
     if uri_str == "toledo://glossary":
-        glossary = t.load_glossary()
+        glossary = db.load_glossary()
         if not glossary:
             return "No glossary entries yet."
         return "\n".join(f"{term} → {canonical}" for term, canonical in sorted(glossary.items()))
@@ -1306,8 +928,8 @@ needs a note, a priority or project should change, or something new should be tr
 call any write tool yet (done_task, set_due, add_note, reprioritize_task, reproject_task, \
 rename_task, create_task, add_subtask, ...). Record it in a running pending-changes list \
 kept in the conversation, and acknowledge it in a few words.
-   - Refer to tasks by partial name, not slug: rename, reprioritize and reproject change a \
-task's slug, so a slug captured earlier may be stale by commit time.
+   - Refer to tasks by partial name or slug. Only rename changes a task's slug, and the old \
+slug keeps resolving afterwards.
    - Coalesce as you go: the latest value wins per field on a task (two due dates become \
 one). A done supersedes earlier due/priority edits on the same task but keeps its notes. \
 For a recurring task, done only advances its cycle, so say that in the summary.
@@ -1345,7 +967,7 @@ to archive) or permanently deleting (delete_task) anything.
 2. Call list_projects and review the category structure itself: rename, split, merge, or \
 otherwise refine categories to make daily use easier. The current categories are not \
 guaranteed to be optimal long-term — don't assume they are. Use rename_project to rename a \
-code in place (updates every task/subtask slug under it), merge_projects to fold one category \
+code in place (carries every task/subtask in it along), merge_projects to fold one category \
 into another, and add_project/remove_project for brand-new or now-empty categories.
 
 3. Reassign individually miscategorized tasks to better-fitting categories via reproject_task.

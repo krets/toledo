@@ -13,7 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
-COPY toledo toledo_mcp.py toledo_server.py ./
+COPY toledo toledo_db.py toledo_mcp.py toledo_server.py ./
 COPY static/ static/
 
 # Ensure toledo script is executable

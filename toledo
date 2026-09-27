@@ -2,6 +2,10 @@
 """
 Toledo - A file-based task manager CLI
 
+DEPRECATED: task data now lives in SQLite (see toledo_db.py) and is served by
+toledo_server.py / toledo_mcp.py. Commands that read or write the legacy file
+tree are disabled; only chat, config and export remain.
+
 Config:  ~/.toledo/config.json
 Tasks:   ~/.toledo/tasks/            (default)
 Context: ~/.toledo/.context
@@ -25,6 +29,9 @@ CONTEXT_FILE = Path.home() / ".toledo" / ".context"
 
 STATES = ["active", "completed", "archive"]
 SUBTASK_STATES = ["active", "completed"]
+# Commands that don't touch the legacy file tree as the store (export reads it
+# for a pre-migration backup).
+LIVE_COMMANDS = {"chat", "config", "export"}
 
 
 # ── Config & helpers ──────────────────────────────────────────────────────────
@@ -968,6 +975,10 @@ def main():
     pimp.add_argument("file")
 
     args = p.parse_args()
+    if args.command not in LIVE_COMMANDS:
+        print("✗ The toledo CLI is deprecated: tasks now live in the SQLite database.\n"
+              "  Use the web app or MCP server. Still available: chat, config, export.")
+        raise SystemExit(1)
     remote_url = get_remote_url()
 
     if remote_url and args.command not in ["config", "export", "import", "init"]:
