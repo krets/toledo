@@ -101,8 +101,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 }
 #fab:active{transform:scale(.93)}
 /* The detail panel covers the FAB's corner; sit beside it, or hide when there's no room */
-body.panel-open #fab{right:636px}
-@media (max-width:700px){body.panel-open #fab{display:none !important}}
+body.panel-open #fab{right:436px}
+@media (max-width:500px){body.panel-open #fab{display:none !important}}
+/* On wide screens the list narrows to sit beside the panel instead of under it */
+@media (min-width:841px){body.panel-open #main{right:420px}}
 
 /* ── Filter bar ── */
 .filter-bar{
@@ -151,6 +153,9 @@ body.panel-open #fab{right:636px}
   border:1px solid var(--border);cursor:pointer;transition:border-color .15s;
 }
 .card:active{border-color:var(--accent)}
+.card:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.card.selected{border-color:var(--accent);background:var(--accent-dim)}
+.card.overdue{border-left:3px solid var(--danger)}
 .card-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .pri-badge{
   font-size:10px;font-weight:700;padding:2px 6px;
@@ -163,7 +168,7 @@ body.panel-open #fab{right:636px}
 .card-meta{display:flex;align-items:center;margin-top:3px;gap:6px}
 .meta-right{display:flex;gap:6px;align-items:center;margin-left:auto;flex-shrink:0}
 .due{font-size:12px;color:var(--muted)}
-.due.over{color:var(--danger);font-weight:600}
+.due.over{color:var(--danger);font-weight:700;background:rgba(231,76,60,.15);padding:1px 6px;border-radius:4px}
 .rec-tag{font-size:11px;color:#9b59b6}
 .sub-count{font-size:11px;color:var(--muted)}
 .state-tag{font-size:11px;padding:2px 6px;border-radius:4px}
@@ -211,7 +216,7 @@ body.panel-open #fab{right:636px}
 
 /* ── Detail panel ── */
 #panel{
-  position:fixed;top:0;right:0;bottom:0;width:100%;max-width:620px;
+  position:fixed;top:0;right:0;bottom:0;width:100%;max-width:420px;
   background:var(--bg);z-index:200;
   transform:translateX(100%);transition:transform .26s cubic-bezier(.4,0,.2,1);
   display:flex;flex-direction:column;overflow:hidden;
@@ -362,6 +367,7 @@ body.panel-open #fab{right:636px}
 .pri-quick-sm{display:flex;gap:6px}
 .pq-btn-sm{flex:1;padding:5px 4px;border:none;border-radius:4px;color:#fff;font-size:11px;font-weight:700;cursor:pointer;opacity:.9;transition:opacity .15s;font-family:inherit}
 .pq-btn-sm:active{opacity:1}
+.pq-btn.on,.pq-btn-sm.on{opacity:1;box-shadow:0 0 0 2px var(--text)}
 .btn{flex:1;padding:12px;border-radius:var(--r);border:none;font-size:15px;font-weight:600;cursor:pointer;transition:opacity .15s;font-family:inherit}
 .btn:active{opacity:.8}
 .btn-p{background:var(--accent);color:#fff}
@@ -501,6 +507,15 @@ function priColor(n) {
   if (n >= 26)  return '#2980b9';
   if (n === 25) return '#27ae60';
   return '#555';
+}
+
+// List badge: solid only for Ultra High, tinted below that.
+function priBadgeStyle(n) {
+  n = parseInt(n);
+  if (n >= 76) return 'background:#c0392b;color:#fff';
+  if (n >= 51) return 'background:rgba(230,126,34,.15);color:#e67e22';
+  if (n === 50) return 'background:var(--surface3);color:var(--text)';
+  return 'background:transparent;color:var(--muted);box-shadow:inset 0 0 0 1px var(--border)';
 }
 
 // ── Hex color helpers ─────────────────────────────────────────────────────────
@@ -931,6 +946,46 @@ document.addEventListener('click', () => {
   document.querySelectorAll('.filter-dropdown,#ham-menu').forEach(d => d.classList.remove('open'));
 });
 
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const menus = document.querySelectorAll('.filter-dropdown.open,#ham-menu.open');
+    if ($('sheet').classList.contains('open')) App.closeSheet();
+    else if (menus.length) menus.forEach(d => d.classList.remove('open'));
+    else if (App.panelOpen()) App.closePanel();
+    else return;
+    e.preventDefault();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey || $('sheet').classList.contains('open')) return;
+  const t = e.target;
+  const card = t.closest && t.closest('.card[data-slug]');
+  if (card && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault();
+    App.openTask(card.dataset.slug);
+    return;
+  }
+  if (t.matches && t.matches('input,textarea,select,[contenteditable]')) return;
+  if (e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (!card && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) return;
+    const cards = [...document.querySelectorAll('#main .card[data-slug]')];
+    if (!cards.length) return;
+    e.preventDefault();
+    const down = e.key === 'j' || e.key === 'ArrowDown';
+    let i = cards.indexOf(card || cards.find(c => c.classList.contains('selected')));
+    i = i < 0 ? (down ? 0 : cards.length - 1) : Math.max(0, Math.min(cards.length - 1, i + (down ? 1 : -1)));
+    cards[i].focus();
+    cards[i].scrollIntoView({ block: 'nearest' });
+    if (App.panelOpen()) App.openTask(cards[i].dataset.slug);
+  } else if (e.key === 'n' && App.view === 'tasks') {
+    e.preventDefault();
+    App.openSheet('new-task');
+  } else if (e.key === '/') {
+    e.preventDefault();
+    App.setView('search');
+    setTimeout(() => $('search-input')?.focus(), 0);
+  }
+});
+
 App.toggleStateFilter = function(s) {
   if (App.stateFilters.has(s)) App.stateFilters.delete(s);
   else App.stateFilters.add(s);
@@ -980,13 +1035,14 @@ App.buildCard = function(t, showState) {
   const subHtml   = totalSubs > 0
     ? `<span class="sub-count">${t.subtasks.completed.length}/${totalSubs} subtasks</span>` : '';
 
-  const pl = priLabel(t.priority), pc = priColor(t.priority);
+  const pl = priLabel(t.priority);
   const pColor = projColor(t.project);
   const pBg = hexToRgba(pColor, 0.15);
+  const cls = 'card' + (t.overdue ? ' overdue' : '') + (App.task && App.panelOpen() && App.task.slug === t.slug ? ' selected' : '');
 
-  return `<div class="card" onclick='App.openTask(${JSON.stringify(t.slug)})'>
+  return `<div class="${cls}" role="button" tabindex="0" data-slug="${esc(t.slug)}" onclick='App.openTask(${JSON.stringify(t.slug)})'>
     <div class="card-top">
-      <span class="pri-badge" style="background:${pc}">${pl}</span>
+      <span class="pri-badge" style="${priBadgeStyle(t.priority)}">${pl}</span>
       <span class="proj-tag" style="background:${pBg};color:${pColor}">${esc(projName(t.project))}</span>
       <span class="task-name">${esc(t.name)}</span>
     </div>
@@ -1191,6 +1247,7 @@ App.openTask = async function(slug) {
     App.renderPanel();
     $('panel').classList.add('open');
     document.body.classList.add('panel-open');
+    App.markSelected();
     $('panel-body').scrollTop = 0;
   } catch(e) { App.toast('✗ ' + e.message); }
 };
@@ -1198,6 +1255,16 @@ App.openTask = async function(slug) {
 App.closePanel = function() {
   $('panel').classList.remove('open');
   document.body.classList.remove('panel-open');
+  App.markSelected();
+};
+
+App.panelOpen = () => $('panel').classList.contains('open');
+
+// Highlight the row whose task is open in the panel.
+App.markSelected = function() {
+  const slug = App.panelOpen() && App.task ? App.task.slug : null;
+  document.querySelectorAll('.card[data-slug]').forEach(c =>
+    c.classList.toggle('selected', c.dataset.slug === slug));
 };
 
 App.renderPanel = function() {
@@ -1435,11 +1502,11 @@ App.openSheet = function(type) {
         <div class="frow">
           <div class="fg"><label>Priority</label>
             <div class="pri-quick-sm">
-              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(75)">High</button>
-              <button class="pq-btn-sm" style="background:#f0a500" onclick="App.setPriQuick(50)">Med</button>
-              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(25)">Low</button>
+              <button class="pq-btn-sm" style="background:#e74c3c" data-pri="75" onclick="App.setPriQuick(75)">High</button>
+              <button class="pq-btn-sm" style="background:#f0a500" data-pri="50" onclick="App.setPriQuick(50)">Med</button>
+              <button class="pq-btn-sm" style="background:#27ae60" data-pri="25" onclick="App.setPriQuick(25)">Low</button>
             </div>
-            <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px">
+            <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px" oninput="App.syncPriQuick()">
           </div>
           <div class="fg"><label>Project</label>
             <select id="f-proj">
@@ -1471,11 +1538,11 @@ App.openSheet = function(type) {
         <div class="frow">
           <div class="fg"><label>Priority</label>
             <div class="pri-quick-sm">
-              <button class="pq-btn-sm" style="background:#e74c3c" onclick="App.setPriQuick(75)">High</button>
-              <button class="pq-btn-sm" style="background:#f0a500" onclick="App.setPriQuick(50)">Med</button>
-              <button class="pq-btn-sm" style="background:#27ae60" onclick="App.setPriQuick(25)">Low</button>
+              <button class="pq-btn-sm" style="background:#e74c3c" data-pri="75" onclick="App.setPriQuick(75)">High</button>
+              <button class="pq-btn-sm" style="background:#f0a500" data-pri="50" onclick="App.setPriQuick(50)">Med</button>
+              <button class="pq-btn-sm" style="background:#27ae60" data-pri="25" onclick="App.setPriQuick(25)">Low</button>
             </div>
-            <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px">
+            <input id="f-pri" type="number" value="50" min="1" max="99" style="margin-top:4px" oninput="App.syncPriQuick()">
           </div>
           <div class="fg"><label>Due date</label><input id="f-due" type="date"></div>
         </div>
@@ -1498,11 +1565,11 @@ App.openSheet = function(type) {
       body: () => `
         <div class="fg"><label>Current: ${App.task?.priority} · ${priLabel(App.task?.priority ?? 50)}</label></div>
         <div class="pri-quick">
-          <button class="pq-btn" style="background:#e74c3c" onclick="App.setPriQuick(75)">High · 75</button>
-          <button class="pq-btn" style="background:#f0a500" onclick="App.setPriQuick(50)">Medium · 50</button>
-          <button class="pq-btn" style="background:#27ae60" onclick="App.setPriQuick(25)">Low · 25</button>
+          <button class="pq-btn" style="background:#e74c3c" data-pri="75" onclick="App.setPriQuick(75)">High · 75</button>
+          <button class="pq-btn" style="background:#f0a500" data-pri="50" onclick="App.setPriQuick(50)">Medium · 50</button>
+          <button class="pq-btn" style="background:#27ae60" data-pri="25" onclick="App.setPriQuick(25)">Low · 25</button>
         </div>
-        <div class="fg"><label>Or enter a number (1–99, higher = more important)</label><input id="f-pri" type="number" min="1" max="99" value="${App.task?.priority ?? 50}"></div>
+        <div class="fg"><label>Or enter a number (1–99, higher = more important)</label><input id="f-pri" type="number" min="1" max="99" value="${App.task?.priority ?? 50}" oninput="App.syncPriQuick()"></div>
         <div class="btn-row">
           <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
           <button class="btn btn-p" onclick="App.submitReprioritize()">Save</button>
@@ -1576,6 +1643,7 @@ App.openSheet = function(type) {
   if (!cfg) return;
   $('sheet-title').textContent = cfg.title;
   $('sheet-body').innerHTML    = cfg.body();
+  App.syncPriQuick();
   $('overlay').classList.add('open');
   $('sheet').classList.add('open');
   setTimeout(() => { const f = $('sheet-body').querySelector('input:not([disabled]):not([type=color]),textarea'); if (f) f.focus(); }, 280);
@@ -1650,6 +1718,12 @@ App.submitDue = async function() {
 App.setPriQuick = function(val) {
   const el = $('f-pri');
   if (el) el.value = val;
+  App.syncPriQuick();
+};
+
+App.syncPriQuick = function() {
+  const v = $('f-pri')?.value;
+  document.querySelectorAll('#sheet-body [data-pri]').forEach(b => b.classList.toggle('on', b.dataset.pri === v));
 };
 
 App.submitReproject = async function() {
