@@ -160,7 +160,8 @@ def err(text: str) -> list[types.TextContent]:
 # every session, and the prompts themselves are fetched on demand.
 SERVER_INSTRUCTIONS = """\
 Toledo is the user's task manager. Tasks are addressed by partial name or slug, and projects by name.
-Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low).
+Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low). Writes also accept the
+labels Ultra High, High, Med-High, Medium, Med-Low, Low and Very Low, in any case.
 
 For more than one write, send them together in a single apply_changes call. Every \
 write result names the task it touched and warns when a partial name matched several \
@@ -248,7 +249,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "name":        {"type": "string", "description": "Task name"},
                     "project":     {"type": "string", "description": "Project name (e.g. Chores). Defaults to General"},
-                    "priority":    {"type": "integer", "description": "Priority 1–99 (higher = more important). Default 50"},
+                    "priority":    {"type": ["integer", "string"], "description": "Priority 1–99 (higher = more important) or a label like High or Med-Low. Default 50"},
                     "due":         {"type": "string", "description": "Due date YYYY-MM-DD"},
                     "recurrence":  {"type": "integer", "description": "Repeat every N days"},
                     "description": {"type": "string", "description": "Task description (Markdown)"},
@@ -258,7 +259,7 @@ async def list_tools() -> list[types.Tool]:
                                         {"type": "string"},
                                         {"type": "object", "properties": {
                                             "name":     {"type": "string"},
-                                            "priority": {"type": "integer"},
+                                            "priority": {"type": ["integer", "string"]},
                                             "due":      {"type": "string"},
                                         }, "required": ["name"]},
                                     ]}},
@@ -319,12 +320,12 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="reprioritize_task",
-            description="Change a task's priority (1–99, higher = more important).",
+            description="Change a task's priority (1–99, higher = more important, or a label like High or Med-Low).",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "task":     {"type": "string"},
-                    "priority": {"type": "integer", "minimum": 1, "maximum": 99},
+                    "priority": {"type": ["integer", "string"], "minimum": 1, "maximum": 99},
                 },
                 "required": ["task", "priority"],
             },
@@ -400,7 +401,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "task":     {"type": "string", "description": "Parent task (partial name or slug)"},
                     "name":     {"type": "string"},
-                    "priority": {"type": "integer", "default": 50, "description": "1–99, higher = more important"},
+                    "priority": {"type": ["integer", "string"], "default": 50, "description": "1–99, higher = more important, or a label like High"},
                     "due":      {"type": "string", "description": "YYYY-MM-DD"},
                 },
                 "required": ["task", "name"],

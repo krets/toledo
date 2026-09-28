@@ -655,7 +655,7 @@ CHATTABLE_TOOLS = [
                 "properties": {
                     "name": {"type": "string"},
                     "project": {"type": "string", "description": "Project code, default GEN"},
-                    "priority": {"type": "integer", "description": "1-99, higher = more important, default 50"},
+                    "priority": {"type": ["integer", "string"], "description": "1-99, higher = more important, or a label like High; default 50"},
                     "due": {"type": "string", "description": "YYYY-MM-DD"},
                     "recur": {"type": "integer", "description": "Days for recurrence"}
                 },
@@ -732,7 +732,7 @@ CHATTABLE_TOOLS = [
                 "properties": {
                     "task": {"type": "string", "description": "Parent task name/slug"},
                     "name": {"type": "string", "description": "Subtask name"},
-                    "priority": {"type": "integer", "default": 50, "description": "1-99, higher = more important"},
+                    "priority": {"type": ["integer", "string"], "default": 50, "description": "1-99, higher = more important, or a label like High"},
                     "due": {"type": "string", "description": "YYYY-MM-DD"}
                 },
                 "required": ["task", "name"]

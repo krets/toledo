@@ -258,6 +258,50 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
 
+# Priority labels as shown to users and MCP clients, each mapped to a value
+# that reads back as the same label. Writes accept them in any case.
+PRIORITY_KEYWORDS = {
+    "Ultra High": 90,
+    "High":       75,
+    "Med-High":   60,
+    "Medium":     50,
+    "Med-Low":    40,
+    "Low":        25,
+    "Very Low":   10,
+}
+
+
+def _priority_key(text: str) -> str:
+    key = " ".join(text.lower().replace("-", " ").replace("_", " ").split())
+    return key.replace("medium ", "med ").replace("mid ", "med ")
+
+
+_PRIORITY_LOOKUP = {_priority_key(k): v for k, v in PRIORITY_KEYWORDS.items()}
+
+
+def parse_priority(value) -> int:
+    """Priority as an int 1–99, from a number, a numeric string, or a label
+    like 'High' or 'med-low' (case-insensitive)."""
+    if isinstance(value, bool):
+        raise ToledoError(f"Invalid priority '{value}'")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int):
+        n = value
+    else:
+        text = str(value).strip()
+        if _priority_key(text) in _PRIORITY_LOOKUP:
+            return _PRIORITY_LOOKUP[_priority_key(text)]
+        try:
+            n = int(text)
+        except ValueError:
+            labels = ", ".join(PRIORITY_KEYWORDS)
+            raise ToledoError(f"Invalid priority '{value}' (expected 1–99 or one of: {labels})")
+    if not 1 <= n <= 99:
+        raise ToledoError(f"Priority {n} is out of range (expected 1–99)")
+    return n
+
+
 def validate_date(value: str) -> str:
     try:
         datetime.strptime(value, "%Y-%m-%d")
@@ -549,13 +593,13 @@ def search(query: str) -> list[dict]:
 
 # ── Task mutations ────────────────────────────────────────────────────────────
 
-def create_task(name: str, project: str | None = None, priority: int | None = None,
+def create_task(name: str, project: str | None = None, priority: int | str | None = None,
                 due: str | None = None, recurrence: int | None = None,
                 description: str | None = None, source: str | None = None) -> dict:
     name = (name or "").strip()
     if not name:
         raise ToledoError("name is required")
-    priority = int(priority or DEFAULT_PRIORITY)
+    priority = DEFAULT_PRIORITY if priority in (None, "") else parse_priority(priority)
     if due:
         validate_date(due)
     recurrence = int(recurrence) if recurrence else None
@@ -654,8 +698,8 @@ def rename_task(ref: str, name: str, source: str | None = None) -> dict:
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
 
-def set_priority(ref: str, priority: int, source: str | None = None) -> dict:
-    priority = int(priority)
+def set_priority(ref: str, priority: int | str, source: str | None = None) -> dict:
+    priority = parse_priority(priority)
     with connect() as c:
         row = _resolve(c, ref)
         if row["priority"] == priority:
@@ -729,11 +773,12 @@ def add_note(ref: str, text: str, source: str | None = None) -> dict:
 
 # ── Subtasks ──────────────────────────────────────────────────────────────────
 
-def add_subtask(ref: str, name: str, priority: int | None = None, due: str | None = None,
+def add_subtask(ref: str, name: str, priority: int | str | None = None, due: str | None = None,
                 description: str | None = None, source: str | None = None) -> dict:
     name = (name or "").strip()
     if not name:
         raise ToledoError("subtask name is required")
+    priority = DEFAULT_PRIORITY if priority in (None, "") else parse_priority(priority)
     if due:
         validate_date(due)
     ts = now_iso()
@@ -743,7 +788,7 @@ def add_subtask(ref: str, name: str, priority: int | None = None, due: str | Non
         cur = c.execute(
             "INSERT INTO tasks (parent_id, slug, name, state, priority, project, due, "
             "description, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
-            (parent["id"], slug, name, int(priority or DEFAULT_PRIORITY), parent["project"],
+            (parent["id"], slug, name, priority, parent["project"],
              due or None, description or "", ts, ts),
         )
         _log(c, parent["id"], "subtask_created", ts, subtask=slug, source=source)
