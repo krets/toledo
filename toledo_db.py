@@ -105,6 +105,20 @@ CREATE TABLE IF NOT EXISTS glossary (
     term      TEXT PRIMARY KEY,
     canonical TEXT NOT NULL
 );
+
+-- Journal entries: the raw dump as given and its revised summary. entry_date
+-- is the submission date unless the entry was backfilled for another day.
+CREATE TABLE IF NOT EXISTS journal (
+    id         INTEGER PRIMARY KEY,
+    entry_date TEXT NOT NULL,
+    title      TEXT NOT NULL DEFAULT '',
+    raw        TEXT NOT NULL DEFAULT '',
+    summary    TEXT NOT NULL DEFAULT '',
+    source     TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS journal_date ON journal(entry_date);
 """
 
 
@@ -865,6 +879,144 @@ def set_glossary_term(term: str, canonical: str) -> None:
         raise ToledoError("term and canonical are required")
     with connect() as c:
         c.execute("INSERT OR REPLACE INTO glossary VALUES (?, ?)", (term.lower(), canonical))
+
+
+# ── Journal ───────────────────────────────────────────────────────────────────
+
+_JOURNAL_ORDER = "ORDER BY entry_date DESC, created_at DESC, id DESC"
+
+
+def _excerpt(text: str, length: int = 160) -> str:
+    """First few lines of Markdown as one plain line, for list views."""
+    lines = [re.sub(r"^(#+|[-*]|>)\s*", "", ln).strip() for ln in (text or "").splitlines()]
+    flat = re.sub(r"[*_`]+", "", " · ".join(ln for ln in lines if ln))
+    return flat if len(flat) <= length else flat[:length - 1].rstrip() + "…"
+
+
+def _journal_dict(row, full: bool = True) -> dict:
+    d = {
+        "id":      row["id"],
+        "date":    row["entry_date"],
+        "title":   row["title"],
+        "source":  row["source"],
+        "created": row["created_at"],
+        "updated": row["updated_at"],
+        "excerpt": _excerpt(row["summary"] or row["raw"]),
+        "has_summary": bool(row["summary"].strip()),
+    }
+    if full:
+        d["raw"] = row["raw"]
+        d["summary"] = row["summary"]
+    return d
+
+
+def _journal_rows(conn, ref) -> list:
+    """Entries a ref names: an id ('12' or '#12'), a date (every entry that
+    day), or 'latest'/empty for the newest entry."""
+    ref = str(ref if ref is not None else "").strip().lstrip("#").lower()
+    if ref in ("", "latest", "last"):
+        rows = conn.execute(f"SELECT * FROM journal {_JOURNAL_ORDER} LIMIT 1").fetchall()
+    elif ref.isdigit():
+        rows = conn.execute("SELECT * FROM journal WHERE id = ?", (int(ref),)).fetchall()
+    elif ref in ("today", "yesterday"):
+        day = datetime.now() - timedelta(days=ref == "yesterday")
+        rows = conn.execute(f"SELECT * FROM journal WHERE entry_date = ? {_JOURNAL_ORDER}",
+                            (day.strftime("%Y-%m-%d"),)).fetchall()
+    else:
+        try:
+            validate_date(ref)
+        except ToledoError:
+            raise ToledoError(f"'{ref}' is not a journal ref: use an id, a YYYY-MM-DD date, "
+                              "'today', 'yesterday', or 'latest'")
+        rows = conn.execute(f"SELECT * FROM journal WHERE entry_date = ? {_JOURNAL_ORDER}",
+                            (ref,)).fetchall()
+    if not rows:
+        raise NotFound(f"No journal entry matching '{ref or 'latest'}'")
+    return rows
+
+
+def _resolve_journal(conn, ref):
+    rows = _journal_rows(conn, ref)
+    if len(rows) > 1:
+        ids = ", ".join(f"#{r['id']}" for r in rows)
+        raise ToledoError(f"{rows[0]['entry_date']} has several journal entries ({ids}); use an id")
+    return rows[0]
+
+
+def add_journal(raw: str, summary: str | None = None, title: str | None = None,
+                date: str | None = None, source: str | None = None) -> dict:
+    raw, summary = (raw or "").strip(), (summary or "").strip()
+    if not raw and not summary:
+        raise ToledoError("raw or summary is required")
+    date = validate_date(date.strip()) if (date or "").strip() else today()
+    ts = now_iso()
+    with connect() as c:
+        cur = c.execute(
+            "INSERT INTO journal (entry_date, title, raw, summary, source, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (date, (title or "").strip(), raw, summary, source, ts, ts),
+        )
+        return _journal_dict(c.execute("SELECT * FROM journal WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+
+def list_journal(limit: int | None = 50, offset: int = 0, query: str | None = None,
+                 since: str | None = None, until: str | None = None) -> list[dict]:
+    """Entries newest first, without their full text. query matches title,
+    raw, or summary; since/until bound entry_date (inclusive)."""
+    sql, params = "SELECT * FROM journal WHERE 1 = 1", []
+    q = (query or "").strip().lower()
+    if q:
+        sql += " AND (lower(title) LIKE ? OR lower(raw) LIKE ? OR lower(summary) LIKE ?)"
+        params += [f"%{q}%"] * 3
+    if since:
+        sql += " AND entry_date >= ?"
+        params.append(validate_date(since))
+    if until:
+        sql += " AND entry_date <= ?"
+        params.append(validate_date(until))
+    sql += f" {_JOURNAL_ORDER} LIMIT ? OFFSET ?"
+    params += [int(limit) if limit else -1, int(offset or 0)]
+    with connect() as c:
+        return [_journal_dict(r, full=False) for r in c.execute(sql, params)]
+
+
+def get_journal(ref=None) -> list[dict]:
+    """Full entries for a ref (see _journal_rows); a date may name several."""
+    with connect() as c:
+        return [_journal_dict(r) for r in _journal_rows(c, ref)]
+
+
+def update_journal(ref, raw: str | None = None, summary: str | None = None,
+                   title: str | None = None, date: str | None = None) -> dict:
+    """Change the given fields of one entry; None leaves a field as it is."""
+    fields = {}
+    if raw is not None:
+        fields["raw"] = raw.strip()
+    if summary is not None:
+        fields["summary"] = summary.strip()
+    if title is not None:
+        fields["title"] = title.strip()
+    if date is not None:
+        fields["entry_date"] = validate_date(date.strip())
+    if not fields:
+        raise ToledoError("nothing to update: give raw, summary, title, or date")
+    with connect() as c:
+        row = _resolve_journal(c, ref)
+        if not (fields.get("raw", row["raw"]) or fields.get("summary", row["summary"])):
+            raise ToledoError("an entry needs a raw or summary text")
+        fields["updated_at"] = now_iso()
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        c.execute(f"UPDATE journal SET {cols} WHERE id = ?", (*fields.values(), row["id"]))
+        return _journal_dict(c.execute("SELECT * FROM journal WHERE id = ?", (row["id"],)).fetchone())
+
+
+def delete_journal(entry_id: int) -> dict:
+    with connect() as c:
+        row = c.execute("SELECT * FROM journal WHERE id = ?", (int(entry_id),)).fetchone()
+        if not row:
+            raise NotFound(f"No journal entry #{entry_id}")
+        c.execute("DELETE FROM journal WHERE id = ?", (row["id"],))
+        return _journal_dict(row, full=False)
 
 
 # ── Context (the "current task" pointer) ──────────────────────────────────────

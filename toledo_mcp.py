@@ -102,6 +102,29 @@ def fmt_task_detail(d: dict) -> str:
     return "\n".join(lines)
 
 
+def jtag(j: dict) -> str:
+    title = f" '{j['title']}'" if j["title"] else ""
+    return f"#{j['id']}{title} [{j['date']}]"
+
+
+def fmt_journal_line(j: dict) -> str:
+    day = datetime.strptime(j["date"], "%Y-%m-%d").strftime("%a")
+    title = f"{j['title']} — " if j["title"] else ""
+    return f"#{j['id']:<4} {j['date']} {day}  {title}{j['excerpt']}"
+
+
+def fmt_journal_detail(j: dict, include_raw: bool = True) -> str:
+    day = datetime.strptime(j["date"], "%Y-%m-%d").strftime("%A %Y-%m-%d")
+    lines = [f"# Journal #{j['id']} — {day}" + (f": {j['title']}" if j["title"] else "")]
+    lines.append(f"Submitted: {j['created'][:16].replace('T', ' ')}")
+    if j["updated"] != j["created"]:
+        lines.append(f"Revised:   {j['updated'][:16].replace('T', ' ')}")
+    lines.append("\n## Summary\n" + (j["summary"] or "_No summary yet._"))
+    if include_raw:
+        lines.append("\n## Raw\n" + (j["raw"] or "_No raw text._"))
+    return "\n".join(lines)
+
+
 def tag(d: dict) -> str:
     """Identify a task in write results so the caller can check the target."""
     return f"'{d['name']}' [{d['slug']}, {d['project']}]"
@@ -141,8 +164,12 @@ Claude.ai's web interface does not support MCP prompts natively, so fetch them w
 the get_prompt tool (name = the prompt name; list_prompts shows what exists). Clients \
 that do surface MCP prompts can use them directly.
 
-Resources (status, projects, active tasks, glossary) are likewise available through \
-the list_resources and get_resource tools.
+Toledo also keeps the user's journal: dated entries holding the raw dump as given and \
+a revised summary. Save with add_journal (it can ride along in apply_changes), and read \
+back with list_journal / get_journal. The newest entries come first.
+
+Resources (status, projects, active tasks, glossary, recent journal) are likewise \
+available through the list_resources and get_resource tools.
 """
 
 server = Server("toledo", instructions=SERVER_INSTRUCTIONS)
@@ -153,6 +180,7 @@ BATCH_OPS = {
     "reprioritize_task", "reproject_task", "set_due", "set_recurrence", "add_note",
     "update_description", "add_subtask", "done_subtask", "delete_subtask",
     "update_glossary", "add_project", "remove_project", "rename_project", "merge_projects",
+    "add_journal", "update_journal",
 }
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
@@ -499,6 +527,74 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="add_journal",
+            description=(
+                "Save a journal entry: the user's raw dump as they gave it, plus a revised "
+                "Markdown summary of it. Dated today unless 'date' backfills another day. "
+                "A day may hold several entries."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "raw":     {"type": "string", "description": "The dump as the user gave it, unedited"},
+                    "summary": {"type": "string", "description": "Revised/summarized version (Markdown)"},
+                    "title":   {"type": "string", "description": "Optional short title"},
+                    "date":    {"type": "string", "description": "YYYY-MM-DD the entry belongs to (default: today)"},
+                },
+                "required": ["raw"],
+            },
+        ),
+        types.Tool(
+            name="list_journal",
+            description=(
+                "List journal entries newest first: id, date, title, and a one-line excerpt. "
+                "Filter by a keyword across title/raw/summary, or by date range. "
+                "Read an entry in full with get_journal."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "default": 10, "description": "Max entries (default 10)"},
+                    "query": {"type": "string", "description": "Keyword to search for"},
+                    "since": {"type": "string", "description": "Earliest date, YYYY-MM-DD"},
+                    "until": {"type": "string", "description": "Latest date, YYYY-MM-DD"},
+                },
+            },
+        ),
+        types.Tool(
+            name="get_journal",
+            description=(
+                "Read journal entries in full (summary and raw). 'entry' is an id, a date "
+                "(YYYY-MM-DD, 'today', 'yesterday': every entry that day), or 'latest' (default)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entry": {"type": "string", "description": "Id, date, or 'latest'"},
+                    "include_raw": {"type": "boolean", "default": True,
+                                    "description": "Include the raw text (default true)"},
+                },
+            },
+        ),
+        types.Tool(
+            name="update_journal",
+            description=(
+                "Revise a journal entry. Only the fields given change. 'entry' is an id, or a "
+                "date/'latest' that names exactly one entry."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "entry":   {"type": "string", "description": "Id, date, or 'latest'"},
+                    "summary": {"type": "string", "description": "New summary (Markdown)"},
+                    "raw":     {"type": "string", "description": "New raw text"},
+                    "title":   {"type": "string"},
+                    "date":    {"type": "string", "description": "Move the entry to another day, YYYY-MM-DD"},
+                },
+                "required": ["entry"],
+            },
+        ),
+        types.Tool(
             name="apply_changes",
             description=(
                 "Apply several writes in one call. Each change is {\"op\": <write tool name>, "
@@ -532,8 +628,9 @@ async def list_tools() -> list[types.Tool]:
             name="list_resources",
             description=(
                 "List Toledo's MCP resources (uri, name, description) — status, projects, "
-                "active tasks, glossary. Exists for clients that only surface MCP tools, not "
-                "the resources capability; fetch a resource's contents with get_resource."
+                "active tasks, glossary, recent journal. Exists for clients that only surface "
+                "MCP tools, not the resources capability; fetch a resource's contents with "
+                "get_resource."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -588,6 +685,9 @@ _ARG_ALIASES = {
     "add_subtask": {"title": "name"},
     "set_due":     {"date": "due", "due_date": "due"},
     "add_note":    {"text": "note", "content": "note"},
+    "add_journal": {"text": "raw", "content": "raw", "dump": "raw", "revised": "summary"},
+    "get_journal": {"id": "entry", "entry_id": "entry", "date": "entry"},
+    "update_journal": {"id": "entry", "entry_id": "entry", "revised": "summary"},
 }
 
 _required_args: dict[str, list[str]] | None = None
@@ -925,6 +1025,29 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         db.set_glossary_term(term, canonical)
         return ok(f"Glossary: '{term}' → '{canonical}'")
 
+    # ── Journal ───────────────────────────────────────────────────────────────
+    if name == "add_journal":
+        j = db.add_journal(args["raw"], summary=args.get("summary"),
+                           title=args.get("title"), date=args.get("date"), source="mcp")
+        return ok(f"Journal saved: {jtag(j)}")
+
+    if name == "list_journal":
+        entries = db.list_journal(limit=args.get("limit") or 10, query=args.get("query"),
+                                  since=args.get("since"), until=args.get("until"))
+        if not entries:
+            return ok("No journal entries found.")
+        return ok("\n".join(fmt_journal_line(j) for j in entries))
+
+    if name == "get_journal":
+        include_raw = args.get("include_raw", True) not in (False, "false", "0")
+        entries = db.get_journal(args.get("entry"))
+        return ok("\n\n---\n\n".join(fmt_journal_detail(j, include_raw) for j in entries))
+
+    if name == "update_journal":
+        j = db.update_journal(args["entry"], raw=args.get("raw"), summary=args.get("summary"),
+                              title=args.get("title"), date=args.get("date"))
+        return ok(f"Journal updated: {jtag(j)}")
+
     # ── apply_changes ─────────────────────────────────────────────────────────
     if name == "apply_changes":
         return ok(await _apply_changes(args["changes"]))
@@ -985,6 +1108,12 @@ async def list_resources() -> list[types.Resource]:
             description="Self-healing glossary of proper nouns/terms, mutated via update_glossary",
             mimeType="text/plain",
         ),
+        types.Resource(
+            uri="toledo://journal/recent",
+            name="Recent Journal",
+            description="The ten newest journal entries (id, date, title, excerpt)",
+            mimeType="text/plain",
+        ),
     ]
 
 
@@ -1009,6 +1138,10 @@ async def read_resource(uri: types.AnyUrl) -> str:
         if not glossary:
             return "No glossary entries yet."
         return "\n".join(f"{term} → {canonical}" for term, canonical in sorted(glossary.items()))
+
+    if uri_str == "toledo://journal/recent":
+        result = await _dispatch("list_journal", {"limit": 10})
+        return result[0].text
 
     raise ValueError(f"Unknown resource: {uri_str}")
 
@@ -1043,11 +1176,16 @@ progress, or abandoned, batch those into one more round of status questions.
    - add_note on tasks that progressed but aren't done, summarizing what happened.
    - create_task for anything mentioned that isn't already tracked (its note and subtasks \
 can ride along on the create).
+   - add_journal as the last change, saving today's journal (see step 5).
    Use slugs from the snapshot for existing tasks. Report any ✗ or ⚠ lines in the result.
 
-5. Generate a dated Markdown artifact ("Toledo Journal — YYYY-MM-DD") summarizing the raw dump \
-and the outcomes of this session, as a journal stub until an Obsidian integration replaces this \
-step. Rendering that artifact is on you, the calling agent — the Toledo server has no part in it.
+5. The journal entry saved in step 4 has two parts. raw is the user's dump exactly as they \
+gave it, not cleaned up. summary is your revised write-up in Markdown: what happened, \
+decisions and ideas worth keeping (with glossary terms in their canonical form), and the task \
+changes this session made. Leave the title empty unless the day has an obvious theme, and \
+leave the date to default to today. If a change in step 4 failed, fix the summary with \
+update_journal (entry "latest") after dealing with the failure. Do not render the journal as \
+an artifact unless the user asks; it lives in Toledo.
 
 6. Close by surfacing a short next-day priority list: the snapshot with this session's \
 changes applied on top, so there is no need to re-read Toledo. Weight it by urgency, not a fixed count — a few Ultra High \
@@ -1148,8 +1286,8 @@ async def list_prompts() -> list[types.Prompt]:
             name="end_of_day_dump",
             description=(
                 "End-of-day / daily brain dump: freeform talk, reconcile against Toledo "
-                "tasks and a self-healing glossary, write back updates, and close with a "
-                "journal summary and next-day priorities. "
+                "tasks and a self-healing glossary, write back updates, save the day's "
+                "journal to Toledo, and close with next-day priorities. "
                 "Trigger phrases: 'end of day dump', 'daily brain dump'."
             ),
         ),

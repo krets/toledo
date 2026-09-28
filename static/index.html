@@ -176,6 +176,15 @@ body.panel-open #fab{right:436px}
 .s-completed{background:rgba(46,204,113,.15);color:var(--success)}
 .s-archive{background:rgba(136,136,136,.12);color:var(--muted)}
 
+/* ── Journal ── */
+.jr-top{display:flex;align-items:baseline;gap:8px}
+.jr-date{font-size:12px;font-weight:600;color:var(--accent);flex-shrink:0;min-width:74px}
+.jr-title{font-size:14px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jr-excerpt{font-size:13px;color:var(--muted);margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.jr-flag{font-size:10px;color:var(--warning);flex-shrink:0}
+.jr-raw{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.jr-search{padding:8px 12px 4px}
+
 /* ── Section label ── */
 .sec{padding:12px 14px 4px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
 
@@ -440,6 +449,10 @@ body.panel-open #fab{right:436px}
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
         Search
       </div>
+      <div class="ham-item" onclick="App.setView('journal')">
+        <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        Journal
+      </div>
       <div class="ham-item" onclick="App.setView('projects')">
         <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
         Edit Projects
@@ -459,7 +472,7 @@ body.panel-open #fab{right:436px}
 
 <div id="main"></div>
 
-<button id="fab" onclick="App.openSheet('new-task')" title="New task">+</button>
+<button id="fab" onclick="App.openSheet(App.view === 'journal' ? 'new-journal' : 'new-task')" title="New">+</button>
 
 <!-- Detail panel -->
 <div id="panel">
@@ -545,6 +558,10 @@ const App = {
   results: [],
   // Chat
   chatMessages: [],
+  // Journal: list (newest first), its search, and the entry open in the panel
+  journalList: [],
+  journalQuery: '',
+  journal: null,
 };
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -686,12 +703,15 @@ App.filteredTasks = function() {
 App.setView = function(v) {
   // Close menus
   document.querySelectorAll('.filter-dropdown,#ham-menu').forEach(d => d.classList.remove('open'));
+  if (App.journal && v !== 'journal') App.closePanel();
   App.view = v;
   if (v === 'settings') { App.loadSettings(); return; }
+  if (v === 'journal') { App.loadJournal().then(() => App.renderMain()); return; }
   App.loadTasks().then(() => App.renderMain());
 };
 
 App.goHome = function() {
+  if (App.journal) App.closePanel();
   App.view = 'tasks';
   App.loadTasks().then(() => App.renderMain());
 };
@@ -720,6 +740,11 @@ App.renderMain = function() {
     case 'projects':
       el.innerHTML = App.buildProjectsView();
       fab.style.display = 'none';
+      back.style.display = 'block';
+      break;
+    case 'journal':
+      el.innerHTML = App.buildJournalView();
+      fab.style.display = 'flex';
       back.style.display = 'block';
       break;
     case 'settings':
@@ -976,9 +1001,9 @@ document.addEventListener('keydown', e => {
     cards[i].focus();
     cards[i].scrollIntoView({ block: 'nearest' });
     if (App.panelOpen()) App.openTask(cards[i].dataset.slug);
-  } else if (e.key === 'n' && App.view === 'tasks') {
+  } else if (e.key === 'n' && (App.view === 'tasks' || App.view === 'journal')) {
     e.preventDefault();
-    App.openSheet('new-task');
+    App.openSheet(App.view === 'journal' ? 'new-journal' : 'new-task');
   } else if (e.key === '/') {
     e.preventDefault();
     App.setView('search');
@@ -1240,10 +1265,145 @@ App.clearSettingsKey = async function() {
   } catch(e) { App.toast('✗ ' + e.message, 4000); }
 };
 
+// ── Journal view ──────────────────────────────────────────────────────────────
+App.loadJournal = async function() {
+  try {
+    const q = App.journalQuery.trim();
+    App.journalList = await api('GET', '/api/journal?limit=200' + (q ? '&q=' + encodeURIComponent(q) : ''));
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+function journalDay(date, opts) {
+  return new Date(date + 'T00:00:00').toLocaleDateString([], opts);
+}
+
+App.buildJournalView = function() {
+  let html = `<div class="view-header">Journal</div>
+    <div class="jr-search"><input id="search-input" type="search" placeholder="Search journal…"
+      value="${esc(App.journalQuery)}" oninput="App.onJournalSearch(this.value)" autocomplete="off"></div>`;
+  if (!App.journalList.length) {
+    const msg = App.journalQuery ? `No entries match "${esc(App.journalQuery)}"` : 'No journal entries yet';
+    return html + `<div class="empty"><div class="empty-icon">📓</div><p>${msg}</p></div>`;
+  }
+  let month = null;
+  App.journalList.forEach(j => {
+    const m = j.date.slice(0, 7);
+    if (m !== month) {
+      month = m;
+      html += `<div class="sec">${esc(journalDay(j.date, { month: 'long', year: 'numeric' }))}</div>`;
+    }
+    const sel = App.journal && App.journal.id === j.id ? ' selected' : '';
+    html += `<div class="card${sel}" role="button" tabindex="0" data-journal="${j.id}" onclick="App.openJournal(${j.id})"
+        onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();App.openJournal(${j.id})}">
+      <div class="jr-top">
+        <span class="jr-date">${esc(journalDay(j.date, { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
+        <span class="jr-title">${esc(j.title || '')}</span>
+        <span class="due" title="Submitted">${esc(j.created.slice(11, 16))}</span>
+        ${j.has_summary ? '' : '<span class="jr-flag" title="No revised summary yet">raw only</span>'}
+      </div>
+      <div class="jr-excerpt">${esc(j.excerpt)}</div>
+    </div>`;
+  });
+  return html;
+};
+
+App.onJournalSearch = async function(q) {
+  App.journalQuery = q;
+  await App.loadJournal();
+  App.renderMain();
+  const inp = $('search-input');
+  if (inp) { inp.focus(); inp.setSelectionRange(q.length, q.length); }
+};
+
+App.markJournalSelected = function() {
+  const id = App.journal ? String(App.journal.id) : null;
+  document.querySelectorAll('.card[data-journal]').forEach(c =>
+    c.classList.toggle('selected', c.dataset.journal === id));
+};
+
+App.openJournal = async function(id) {
+  try {
+    App.journal = await api('GET', '/api/journal/' + id);
+    App.task = null;
+    App.renderJournalPanel();
+    $('panel').classList.add('open');
+    document.body.classList.add('panel-open');
+    App.markSelected();
+    App.markJournalSelected();
+    $('panel-body').scrollTop = 0;
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.renderJournalPanel = function() {
+  const j = App.journal;
+  if (!j) return;
+  const day = journalDay(j.date, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const stamp = ts => ts.replace('T', ' ').slice(0, 16);
+  let pills = `<span class="meta-pill" style="cursor:default"><span class="lbl">Submitted</span><span class="val">${esc(stamp(j.created))}</span></span>`;
+  if (j.updated !== j.created) {
+    pills += `<span class="meta-pill" style="cursor:default"><span class="lbl">Revised</span><span class="val">${esc(stamp(j.updated))}</span></span>`;
+  }
+  if (j.source) {
+    pills += `<span class="meta-pill" style="cursor:default"><span class="lbl">Via</span><span class="val">${esc(j.source)}</span></span>`;
+  }
+  $('panel-info').innerHTML = `<h2>${esc(j.title || day)}</h2>
+    ${j.title ? `<div style="font-size:13px;color:var(--muted)">${esc(day)}</div>` : ''}
+    <div class="panel-meta">${pills}</div>`;
+  $('panel-actions').innerHTML = `<button class="abtn" onclick="App.openSheet('edit-journal')">✎ Edit</button>
+    <button class="abtn dng" onclick="App.deleteJournal()">🗑 Delete</button>`;
+
+  const summary = j.summary.trim() ? `<div class="md">${mdToHtml(j.summary)}</div>` : `<p class="md-empty">No summary yet.</p>`;
+  const raw = j.raw.trim() ? `<div class="jr-raw">${esc(j.raw)}</div>` : `<p class="md-empty">No raw text.</p>`;
+  $('panel-body').innerHTML = `<div class="psec">
+      <div class="psec-head"><span class="psec-title">Summary</span></div>
+      <div class="psec-body">${summary}</div>
+    </div>
+    <div class="psec" style="border-bottom:none">
+      <details class="log-details"${j.summary.trim() ? '' : ' open'}>
+        <summary>Raw</summary>
+        <div class="log-inner">${raw}</div>
+      </details>
+    </div>`;
+};
+
+App.deleteJournal = async function() {
+  const j = App.journal;
+  if (!j || !confirm(`Delete the journal entry for ${j.date}? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', '/api/journal/' + j.id);
+    App.closePanel();
+    App.toast('Deleted');
+    await App.loadJournal();
+    App.renderMain();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitJournal = async function() {
+  const body = {
+    date:    $('f-jdate')?.value || null,
+    title:   $('f-jtitle')?.value.trim() || '',
+    summary: $('f-jsummary')?.value || '',
+    raw:     $('f-jraw')?.value || '',
+  };
+  if (!body.raw.trim() && !body.summary.trim()) { App.toast('Write something first'); return; }
+  const editing = App.sheetType === 'edit-journal' && App.journal;
+  try {
+    const j = editing
+      ? await api('PATCH', '/api/journal/' + App.journal.id, body)
+      : await api('POST', '/api/journal', body);
+    App.closeSheet();
+    App.toast(editing ? '✓ Entry updated' : '✓ Entry saved');
+    await App.loadJournal();
+    App.renderMain();
+    App.openJournal(j.id);
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
 // ── Task detail panel ─────────────────────────────────────────────────────────
 App.openTask = async function(slug) {
   try {
     App.task = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
+    App.journal = null;
     App.renderPanel();
     $('panel').classList.add('open');
     document.body.classList.add('panel-open');
@@ -1253,6 +1413,8 @@ App.openTask = async function(slug) {
 };
 
 App.closePanel = function() {
+  App.journal = null;
+  App.markJournalSelected();
   $('panel').classList.remove('open');
   document.body.classList.remove('panel-open');
   App.markSelected();
@@ -1624,6 +1786,14 @@ App.openSheet = function(type) {
           <button class="btn btn-p" onclick="App.submitRenameSubtask()">Rename</button>
         </div>`,
     },
+    'new-journal': {
+      title: 'New journal entry',
+      body: () => App.journalForm({ date: new Date().toLocaleDateString('en-CA'), title: '', summary: '', raw: '' }),
+    },
+    'edit-journal': {
+      title: 'Edit journal entry',
+      body: () => App.journalForm(App.journal || {}),
+    },
     'new-project': {
       title: 'New project',
       body: () => `
@@ -1641,12 +1811,27 @@ App.openSheet = function(type) {
 
   const cfg = configs[type];
   if (!cfg) return;
+  App.sheetType = type;
   $('sheet-title').textContent = cfg.title;
   $('sheet-body').innerHTML    = cfg.body();
   App.syncPriQuick();
   $('overlay').classList.add('open');
   $('sheet').classList.add('open');
   setTimeout(() => { const f = $('sheet-body').querySelector('input:not([disabled]):not([type=color]),textarea'); if (f) f.focus(); }, 280);
+};
+
+App.journalForm = function(j) {
+  return `
+    <div class="frow">
+      <div class="fg"><label>Date</label><input id="f-jdate" type="date" value="${esc(j.date || '')}"></div>
+      <div class="fg"><label>Title</label><input id="f-jtitle" type="text" value="${esc(j.title || '')}" autocomplete="off" placeholder="Optional"></div>
+    </div>
+    <div class="fg"><label>Raw</label><textarea id="f-jraw" rows="8" placeholder="The dump, as it came out…">${esc(j.raw || '')}</textarea></div>
+    <div class="fg"><label>Summary (Markdown)</label><textarea id="f-jsummary" rows="8" placeholder="Revised version…">${esc(j.summary || '')}</textarea></div>
+    <div class="btn-row">
+      <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+      <button class="btn btn-p" onclick="App.submitJournal()">Save</button>
+    </div>`;
 };
 
 App.closeSheet = function() {

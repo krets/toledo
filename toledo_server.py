@@ -327,6 +327,43 @@ def remove_project(code):
     return jsonify({"deleted": True})
 
 
+# ── Journal ───────────────────────────────────────────────────────────────────
+
+@app.route("/api/journal", methods=["GET"])
+def list_journal():
+    """Entries newest first, without full text. ?q= searches, ?since=/&until=
+    bound the date, ?limit=/&offset= page through."""
+    a = request.args
+    return jsonify(db.list_journal(limit=int(a.get("limit", 50)), offset=int(a.get("offset", 0)),
+                                   query=a.get("q"), since=a.get("since"), until=a.get("until")))
+
+
+@app.route("/api/journal/<int:entry_id>", methods=["GET"])
+def get_journal(entry_id):
+    return jsonify(db.get_journal(entry_id)[0])
+
+
+@app.route("/api/journal", methods=["POST"])
+def add_journal():
+    data = request.json or {}
+    j = db.add_journal(data.get("raw"), summary=data.get("summary"), title=data.get("title"),
+                       date=data.get("date"), source="web")
+    return jsonify(j), 201
+
+
+@app.route("/api/journal/<int:entry_id>", methods=["PATCH"])
+def update_journal(entry_id):
+    data = request.json or {}
+    return jsonify(db.update_journal(entry_id, raw=data.get("raw"), summary=data.get("summary"),
+                                     title=data.get("title"), date=data.get("date")))
+
+
+@app.route("/api/journal/<int:entry_id>", methods=["DELETE"])
+def delete_journal(entry_id):
+    db.delete_journal(entry_id)
+    return jsonify({"deleted": True})
+
+
 # ── Context ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/ctx", methods=["GET"])
