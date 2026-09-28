@@ -255,6 +255,8 @@ body.panel-open #fab{right:436px}
 .panel-back{background:none;border:none;color:var(--accent);cursor:pointer;padding:4px;flex-shrink:0;font-size:20px;line-height:1;margin-top:1px}
 .panel-info{flex:1;min-width:0}
 .panel-info h2{font-size:16px;font-weight:600;word-break:break-word}
+.panel-crumb{background:none;border:none;padding:0;margin-bottom:4px;color:var(--muted);font:inherit;font-size:12px;cursor:pointer;text-align:left}
+.panel-crumb:hover{color:var(--text);text-decoration:underline}
 .panel-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
 .meta-pill{
   display:flex;align-items:center;gap:4px;
@@ -321,7 +323,8 @@ body.panel-open #fab{right:436px}
 .sub-check:hover{border-color:var(--accent)}
 .sub-check.done{background:var(--success);border-color:var(--success)}
 .sub-check.done::after{content:'✓';color:#fff;font-size:11px;font-weight:700}
-.sub-name{font-size:14px;flex:1}
+.sub-name{font-size:14px;flex:1;cursor:pointer}
+.sub-name:hover{text-decoration:underline}
 .sub-name.done{text-decoration:line-through;color:var(--muted)}
 .sub-rename{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:3px 5px;border-radius:4px;opacity:0;transition:opacity .15s;line-height:1}
 .sub-item:hover .sub-rename{opacity:1}
@@ -1106,7 +1109,7 @@ App.buildCard = function(t, showState) {
   const pl = priLabel(t.priority);
   const pColor = projColor(t.project);
   const pBg = hexToRgba(pColor, 0.15);
-  const cls = 'card' + (t.overdue ? ' overdue' : '') + (App.task && App.panelOpen() && App.task.slug === t.slug ? ' selected' : '');
+  const cls = 'card' + (t.overdue ? ' overdue' : '') + (App.task && App.panelOpen() && App.task.ref === t.slug ? ' selected' : '');
 
   return `<div class="${cls}" role="button" tabindex="0" data-slug="${esc(t.slug)}" onclick='App.openTask(${JSON.stringify(t.slug)})'>
     <div class="card-top">
@@ -1548,7 +1551,7 @@ App.setActivityFilter = async function(key, value) {
 // A task's whole history, its subtasks' included, from its Activity Log.
 App.showTaskActivity = function(slug) {
   App.activityFilter = { scope: '', project: '', action: '', task: slug };
-  App.activityTaskName = App.task && App.task.slug === slug ? App.task.name : slug;
+  App.activityTaskName = App.task && App.task.ref === slug ? App.task.name : slug;
   App.closePanel();
   App.setView('activity');
 };
@@ -1661,7 +1664,7 @@ App.panelOpen = () => $('panel').classList.contains('open');
 
 // Highlight the row whose task is open in the panel.
 App.markSelected = function() {
-  const slug = App.panelOpen() && App.task ? App.task.slug : null;
+  const slug = App.panelOpen() && App.task ? App.task.ref : null;
   document.querySelectorAll('.card[data-slug]').forEach(c =>
     c.classList.toggle('selected', c.dataset.slug === slug));
 };
@@ -1698,7 +1701,13 @@ App.renderPanel = function() {
   // Project pill
   const tkProjColor = projColor(tk.project);
   const tkProjBg = hexToRgba(tkProjColor, 0.15);
-  metaPills += `<button class="meta-pill" onclick="App.openSheet('change-project')" title="Change project"
+  // A subtask's project is its parent's.
+  metaPills += tk.parent
+    ? `<span class="meta-pill" style="cursor:default;border-color:${hexToRgba(tkProjColor,.3)}" title="Set by the parent task">
+    <span class="lbl">Project</span>
+    <span class="val" style="color:${tkProjColor}">${esc(projName(tk.project))}</span>
+  </span>`
+    : `<button class="meta-pill" onclick="App.openSheet('change-project')" title="Change project"
     style="border-color:${hexToRgba(tkProjColor,.3)}">
     <span class="lbl">Project</span>
     <span class="val" style="color:${tkProjColor}">${esc(projName(tk.project))}</span>
@@ -1717,7 +1726,10 @@ App.renderPanel = function() {
     </span>`;
   }
 
-  $('panel-info').innerHTML = `<h2>${esc(tk.name)}</h2><div class="panel-meta">${metaPills}</div>`;
+  const crumb = tk.parent
+    ? `<button class="panel-crumb" onclick='App.openTask(${JSON.stringify(tk.parent.slug)})'>↑ ${esc(tk.parent.name)}</button>`
+    : '';
+  $('panel-info').innerHTML = `${crumb}<h2>${esc(tk.name)}</h2><div class="panel-meta">${metaPills}</div>`;
 
   // Action buttons
   let actions = '';
@@ -1727,7 +1739,7 @@ App.renderPanel = function() {
       actions += `<button class="abtn wrn" onclick="App.doAction('cancel')">✕ Cancel Recurrence</button>`;
     }
   } else if (tk.state === 'completed') {
-    actions += `<button class="abtn" onclick="App.doAction('archive')">Archive</button>`;
+    if (!tk.parent) actions += `<button class="abtn" onclick="App.doAction('archive')">Archive</button>`;
     actions += `<button class="abtn suc" onclick="App.doMove('active')">↩ Make Active</button>`;
   } else if (tk.state === 'archive') {
     actions += `<button class="abtn suc" onclick="App.doMove('active')">↩ Make Active</button>`;
@@ -1764,11 +1776,12 @@ App.renderPanel = function() {
         <button class="sub-check${s.done ? ' done' : ''}"
           onclick='${s.done ? `App.undoSubtask(${JSON.stringify(s.slug)})` : `App.doneSubtask(${JSON.stringify(s.slug)})`}'
           title="${s.done ? 'Mark incomplete' : 'Mark done'}"></button>
-        <span class="sub-name${s.done ? ' done' : ''}">${esc(s.name)}</span>
+        <span class="sub-name${s.done ? ' done' : ''}" onclick="App.openTask('#${s.id}')" title="Open subtask">${esc(s.name)}</span>
         <button class="sub-rename" onclick='App.openSubRename(${JSON.stringify(s.slug)},${JSON.stringify(s.name)})' title="Rename">✎</button>
         <button class="sub-delete" onclick='App.deleteSubtask(${JSON.stringify(s.slug)},${JSON.stringify(s.name)})' title="Delete">🗑</button>
       </div>`).join('');
-  body += `<div class="psec">
+  // Subtasks don't nest.
+  if (!tk.parent) body += `<div class="psec">
     <div class="psec-head">
       <span class="psec-title">Subtasks</span>
       <button class="psec-act" onclick="App.openSheet('add-subtask')">+ Add</button>
@@ -1790,7 +1803,7 @@ App.renderPanel = function() {
         : `<div class="wlog-entry"><div class="wlog-text">${esc(entry.trim())}</div></div>`;
     }).join('');
   }
-  const draft = App.noteDrafts[tk.slug] || '';
+  const draft = App.noteDrafts[tk.ref] || '';
   const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
   body += `<div class="psec">
     <div class="psec-head">
@@ -1829,7 +1842,7 @@ App.renderPanel = function() {
     <details class="log-details">
       <summary>Activity Log</summary>
       <div class="log-inner">${logHtml}
-        <button class="log-more" onclick='App.showTaskActivity(${JSON.stringify(tk.slug)})'>Full history with subtasks ›</button>
+        <button class="log-more" onclick='App.showTaskActivity(${JSON.stringify(tk.ref)})'>Full history with subtasks ›</button>
       </div>
     </details>
   </div>`;
@@ -1840,25 +1853,31 @@ App.renderPanel = function() {
 App.doAction = async function(action) {
   if (!App.task) return;
   try {
-    const d = await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/${action}`);
+    const d = await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/${action}`);
     if (action === 'done' && d.recurring) {
       App.toast(`↻ Next due: ${d.next_due}`);
-      App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+      App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
       App.renderPanel();
     } else {
       App.toast(action === 'done' ? '✓ Completed' : action === 'archive' ? 'Archived' : 'Done');
-      App.closePanel();
+      App.leaveTask();
     }
     App.loadTasks().then(() => App.renderMain());
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
+// After closing out the open task: back to the parent for a subtask.
+App.leaveTask = function() {
+  if (App.task?.parent) App.openTask(App.task.parent.slug);
+  else App.closePanel();
+};
+
 App.doMove = async function(state) {
   if (!App.task) return;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/move`, { state });
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/move`, { state });
     App.toast(`→ ${state}`);
-    App.closePanel();
+    App.leaveTask();
     App.loadTasks().then(() => App.renderMain());
   } catch(e) { App.toast('✗ ' + e.message); }
 };
@@ -1866,8 +1885,8 @@ App.doMove = async function(state) {
 App.doneSubtask = async function(subSlug) {
   if (!App.task) return;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/subdone`, { slug: subSlug });
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subdone`, { slug: subSlug });
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('✓ Subtask done');
   } catch(e) { App.toast('✗ ' + e.message); }
@@ -1876,8 +1895,8 @@ App.doneSubtask = async function(subSlug) {
 App.undoSubtask = async function(subSlug) {
   if (!App.task) return;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/subundo`, { slug: subSlug });
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subundo`, { slug: subSlug });
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('↩ Subtask reopened');
   } catch(e) { App.toast('✗ ' + e.message); }
@@ -1886,8 +1905,8 @@ App.undoSubtask = async function(subSlug) {
 App.deleteSubtask = async function(subSlug, subName) {
   if (!App.task || !confirm(`Delete subtask "${subName}"? This cannot be undone.`)) return;
   try {
-    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.slug)}/sub/${encodeURIComponent(subSlug)}`);
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.ref)}/sub/${encodeURIComponent(subSlug)}`);
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('🗑 Subtask deleted');
   } catch(e) { App.toast('✗ ' + e.message); }
@@ -1896,8 +1915,8 @@ App.deleteSubtask = async function(subSlug, subName) {
 App.confirmDelete = async function() {
   if (!App.task || !confirm(`Delete "${App.task.name}"? This cannot be undone.`)) return;
   try {
-    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.slug)}`);
-    App.closePanel();
+    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.ref)}`);
+    App.leaveTask();
     App.toast('Deleted');
     App.loadTasks().then(() => App.renderMain());
   } catch(e) { App.toast('✗ ' + e.message); }
@@ -2103,7 +2122,7 @@ App.submitNewTask = async function() {
 App.noteDrafts = {};
 
 App.noteInput = function(el) {
-  if (App.task) App.noteDrafts[App.task.slug] = el.value;
+  if (App.task) App.noteDrafts[App.task.ref] = el.value;
   $('note-submit').disabled = !el.value.trim();
 };
 
@@ -2118,14 +2137,14 @@ App.submitNote = async function() {
   const input = $('note-input'), btn = $('note-submit');
   const text = input?.value.trim();
   if (!text || !App.task || btn.disabled) return;
-  const slug = App.task.slug;
+  const slug = App.task.ref;
   btn.disabled = true;
   try {
     await api('POST', `/api/tasks/${encodeURIComponent(slug)}/note`, { text });
     delete App.noteDrafts[slug];
     App.toast('✓ Note added');
     const updated = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
-    if (App.task?.slug !== slug) return;  // moved on to another task meanwhile
+    if (App.task?.ref !== slug) return;  // moved on to another task meanwhile
     App.task = updated;
     App.renderPanel();
     $('note-input')?.focus();
@@ -2139,13 +2158,13 @@ App.submitSubtask = async function() {
   const name = $('f-name')?.value.trim();
   if (!name || !App.task) { App.toast('Name required'); return; }
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/sub`, {
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/sub`, {
       name,
       priority: parseInt($('f-pri')?.value || '50'),
       due:      $('f-due')?.value || null,
     });
     App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('✓ Subtask added');
   } catch(e) { App.toast('✗ ' + e.message); }
@@ -2155,9 +2174,9 @@ App.submitDue = async function() {
   const date = $('f-due')?.value;
   if (!date || !App.task) { App.toast('Date required'); return; }
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/due`, { date });
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/due`, { date });
     App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('✓ Due date set');
     App.loadTasks().then(() => App.renderMain());
@@ -2179,9 +2198,9 @@ App.submitReproject = async function() {
   const proj = $('f-proj')?.value;
   if (!proj || !App.task) { App.toast('Project required'); return; }
   try {
-    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/reproject`, { project: proj });
+    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/reproject`, { project: proj });
     App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.ref));
     App.renderPanel();
     App.toast(`✓ Project → ${projName(proj)}`);
     App.loadTasks().then(() => App.renderMain());
@@ -2192,9 +2211,9 @@ App.submitReprioritize = async function() {
   const pri = parseInt($('f-pri')?.value);
   if (!pri || !App.task) { App.toast('Priority required'); return; }
   try {
-    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/reprioritize`, { priority: pri });
+    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/reprioritize`, { priority: pri });
     App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.ref));
     App.renderPanel();
     App.toast(`✓ Priority → ${pri}`);
     App.loadTasks().then(() => App.renderMain());
@@ -2205,9 +2224,9 @@ App.submitEditDesc = async function() {
   const text = $('f-desc')?.value;
   if (text == null || !App.task) return;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/edit`, { text });
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/edit`, { text });
     App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('✓ Description updated');
   } catch(e) { App.toast('✗ ' + e.message); }
@@ -2217,9 +2236,9 @@ App.submitRenameTask = async function() {
   const name = $('f-rename')?.value.trim();
   if (!name || !App.task) { App.toast('Name required'); return; }
   try {
-    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/rename`, { name });
+    const updated = await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/rename`, { name });
     App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(updated.ref));
     App.renderPanel();
     App.toast('✓ Renamed');
     App.loadTasks().then(() => App.renderMain());
@@ -2235,10 +2254,10 @@ App.submitRenameSubtask = async function() {
   const name = $('f-rename')?.value.trim();
   if (!name || !App.task || !App._renameSub) { App.toast('Name required'); return; }
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/subrename`,
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subrename`,
       { slug: App._renameSub.slug, name });
     App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('✓ Subtask renamed');
   } catch(e) { App.toast('✗ ' + e.message); }

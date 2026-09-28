@@ -462,10 +462,21 @@ def _subtasks(conn, parent_ids: list[int]) -> dict[int, list[dict]]:
 
 
 def _dicts(conn, rows) -> list[dict]:
+    """Task dicts with their subtasks, and a subtask's parent (slug, name)."""
     tasks = [_base_dict(r) for r in rows]
     subs = _subtasks(conn, [t["id"] for t in tasks])
+    parent_ids = sorted({t["parent_id"] for t in tasks if t["parent_id"]})
+    parents = {
+        r["id"]: {"slug": r["slug"], "name": r["name"]}
+        for r in conn.execute(
+            f"SELECT id, slug, name FROM tasks WHERE id IN ({','.join('?' * len(parent_ids))})",
+            parent_ids,
+        )
+    } if parent_ids else {}
     for t in tasks:
         t["subtasks"] = subs[t["id"]]
+        if t["parent_id"]:
+            t["parent"] = parents.get(t["parent_id"])
     return tasks
 
 
@@ -511,7 +522,32 @@ _STATE_ORDER = "CASE state WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 E
 def _match(conn, ref: str):
     """Return (row, partial): the task ref names, plus every row it partially
     matched with the chosen one first (empty when ref named a task exactly by
-    id, slug, or former slug)."""
+    id, slug, or former slug).
+
+    '#id' names any task or subtask by id and 'parent/child' names a subtask;
+    any other ref names a top-level task. A 'parent/child' ref that names no
+    subtask is tried as a whole, since task names can contain '/'."""
+    ref = (ref or "").strip()
+    if not ref:
+        return None, []
+    if ref.startswith("#") and ref[1:].isdigit():
+        return conn.execute("SELECT * FROM tasks WHERE id = ?", (int(ref[1:]),)).fetchone(), []
+    if "/" in ref:
+        head, tail = ref.split("/", 1)
+        parent, partial = _match_top(conn, head)
+        if parent and tail.strip():
+            subs = _find_subtasks(conn, parent["id"], tail, STATES)
+            if len(subs) > 1:
+                names = ", ".join(f"{parent['slug']}/{r['slug']} ({r['state']})" for r in subs)
+                raise ToledoError(f"'{ref}' is ambiguous — matches: {names}")
+            if subs:
+                # Other top-level tasks the parent part also matched.
+                return subs[0], (subs + partial[1:]) if len(partial) > 1 else []
+    return _match_top(conn, ref)
+
+
+def _match_top(conn, ref: str):
+    """_match for a plain ref: top-level tasks only."""
     ref = (ref or "").strip()
     if not ref:
         return None, []
@@ -560,6 +596,19 @@ def _resolve(conn, ref: str):
     if not row:
         raise NotFound(f"No task matching '{ref}'")
     return row
+
+
+def _resolve_parent(conn, ref: str):
+    """_resolve for a ref that must name a top-level task: a subtask's parent."""
+    row = _resolve(conn, ref)
+    if row["parent_id"]:
+        raise ToledoError(f"'{row['slug']}' is a subtask; subtasks can't have subtasks")
+    return row
+
+
+def _reject_subtask(row, why: str) -> None:
+    if row["parent_id"]:
+        raise ToledoError(f"'{row['slug']}' is a subtask; {why}")
 
 
 def find_task(ref: str) -> dict | None:
@@ -821,6 +870,8 @@ def move_task(ref: str, state: str, source: str | None = None) -> dict:
         raise ToledoError(f"state must be one of {STATES}")
     with connect() as c:
         row = _resolve(c, ref)
+        if state == "archive":
+            _reject_subtask(row, "archive its parent instead")
         if row["state"] != state:
             _touch(c, row["id"], state=state)
             _log_task(c, row["id"], "state_changed", from_state=row["state"], to_state=state, source=source)
@@ -863,7 +914,7 @@ def _snapshot_history(conn, task_id: int) -> None:
 def delete_task(ref: str, source: str | None = None) -> dict:
     with connect() as c:
         row = _resolve(c, ref)
-        d = _base_dict(row)
+        d = _dicts(c, [row])[0]
         subtasks = c.execute("SELECT count(*) FROM tasks WHERE parent_id = ?", (row["id"],)).fetchone()[0]
         # Logged first: the delete then clears task_id on this and every
         # earlier event, leaving the snapshot to say which task it was.
@@ -889,7 +940,7 @@ def rename_task(ref: str, name: str, source: str | None = None) -> dict:
         raise ToledoError("name is required")
     with connect() as c:
         row = _resolve(c, ref)
-        slug = _unique_slug(c, name, None, exclude_id=row["id"])
+        slug = _unique_slug(c, name, row["parent_id"], exclude_id=row["id"])
         if slug != row["slug"]:
             c.execute("INSERT INTO task_aliases (task_id, slug) VALUES (?, ?)", (row["id"], row["slug"]))
         _touch(c, row["id"], name=name, slug=slug)
@@ -913,6 +964,7 @@ def set_project(ref: str, project: str, source: str | None = None) -> dict:
     with connect() as c:
         project = _project_code(c, project)
         row = _resolve(c, ref)
+        _reject_subtask(row, "subtasks inherit the parent's project")
         if row["project"] == project:
             raise ToledoError(f"Task is already in project {_project_name(c, project)}")
         _touch(c, row["id"], project=project)
@@ -971,7 +1023,7 @@ def add_note(ref: str, text: str, source: str | None = None) -> dict:
     with connect() as c:
         row = _resolve(c, ref)
         _add_note(c, row["id"], text, source)
-        return _base_dict(row)
+        return _dicts(c, [row])[0]
 
 
 # ── Subtasks ──────────────────────────────────────────────────────────────────
@@ -986,7 +1038,7 @@ def add_subtask(ref: str, name: str, priority: int | str | None = None, due: str
         validate_date(due)
     ts = now_iso()
     with connect() as c:
-        parent = _resolve(c, ref)
+        parent = _resolve_parent(c, ref)
         slug = _unique_slug(c, name, parent["id"])
         cur = c.execute(
             "INSERT INTO tasks (parent_id, slug, name, state, priority, project, due, "
@@ -1009,7 +1061,7 @@ def set_subtask_state(ref: str, sub_ref: str, state: str, source: str | None = N
         raise ToledoError(f"state must be one of {SUBTASK_STATES}")
     other = "active" if state == "completed" else "completed"
     with connect() as c:
-        parent = _resolve(c, ref)
+        parent = _resolve_parent(c, ref)
         sub = _resolve_subtask(c, parent["id"], sub_ref, [other], first=first_match)
         _touch(c, sub["id"], state=state)
         _log_task(c, sub["id"], "state_changed", from_state=other, to_state=state, source=source)
@@ -1023,7 +1075,7 @@ def rename_subtask(ref: str, sub_ref: str, name: str, source: str | None = None)
     if not name:
         raise ToledoError("name is required")
     with connect() as c:
-        parent = _resolve(c, ref)
+        parent = _resolve_parent(c, ref)
         sub = _resolve_subtask(c, parent["id"], sub_ref)
         slug = _unique_slug(c, name, parent["id"], exclude_id=sub["id"])
         if slug != sub["slug"]:
@@ -1037,7 +1089,7 @@ def rename_subtask(ref: str, sub_ref: str, name: str, source: str | None = None)
 
 def delete_subtask(ref: str, sub_ref: str, source: str | None = None) -> dict:
     with connect() as c:
-        parent = _resolve(c, ref)
+        parent = _resolve_parent(c, ref)
         sub = _resolve_subtask(c, parent["id"], sub_ref)
         _log_task(c, sub["id"], "deleted", state=sub["state"], source=source)
         _snapshot_history(c, sub["id"])
@@ -1411,6 +1463,7 @@ def set_context(ref: str | None, source: str | None = None) -> str | None:
                 _log_context(c, "context_cleared", old_id, source=source)
             return None
         row = _resolve(c, ref)
+        _reject_subtask(row, "set the context to its parent instead")
         c.execute("INSERT OR REPLACE INTO meta VALUES ('context', ?)", (str(row["id"]),))
         if row["id"] != old_id:
             _log_context(c, "context_set", row["id"], source=source)

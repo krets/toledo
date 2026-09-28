@@ -94,11 +94,13 @@ def fmt_event_line(e: dict) -> str:
 def fmt_task_detail(d: dict) -> str:
     lines = [
         f"# {d['name']}",
-        f"Slug:     {d['slug']}",
+        f"Slug:     {task_ref(d)}  (#{d['id']})",
         f"State:    {d['state']}",
         f"Priority: {d['priority']} — {d['pri_label']}",
         f"Project:  {d['project_name']}",
     ]
+    if d.get("parent"):
+        lines.insert(2, f"Parent:   {d['parent']['name']}  ({d['parent']['slug']})")
     if d.get("updated"):
         lines.append(f"Updated:  {d['updated'][:16].replace('T', ' ')}")
     if d["due"]:
@@ -110,7 +112,7 @@ def fmt_task_detail(d: dict) -> str:
         lines.append("\n## Subtasks")
         for s in d["subtasks"]:
             mark = "✓" if s["state"] == "completed" else "○"
-            lines.append(f"  {mark} {s['name']}  ({s['slug']})")
+            lines.append(f"  {mark} {s['name']}  ({d['slug']}/{s['slug']}, #{s['id']})")
 
     if d.get("description", "").strip():
         lines.append("\n## Description")
@@ -167,7 +169,13 @@ def glossary_warning(j: dict) -> str:
 def tag(d: dict) -> str:
     """Identify a task in write results so the caller can check the target."""
     project = d.get("project_name") or db.project_name(d["project"])
-    return f"'{d['name']}' [{d['slug']}, {project}]"
+    return f"'{d['name']}' [{task_ref(d)}, {project}]"
+
+
+def task_ref(d: dict) -> str:
+    """A ref that names d: its slug, or 'parent/child' for a subtask."""
+    parent = d.get("parent")
+    return f"{parent['slug']}/{d['slug']}" if parent else d["slug"]
 
 
 def ok(text: str) -> list[types.TextContent]:
@@ -184,6 +192,7 @@ def err(text: str) -> list[types.TextContent]:
 # every session, and the prompts themselves are fetched on demand.
 SERVER_INSTRUCTIONS = """\
 Toledo is the user's task manager. Tasks are addressed by partial name or slug, and projects by name.
+Every task tool also works on a subtask, addressed as 'parent/child' or by the '#id' get_task shows.
 Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low). Writes also accept the
 labels Ultra High, High, Med-High, Medium, Med-Low, Low and Very Low, in any case.
 
@@ -227,6 +236,10 @@ BATCH_OPS = {
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 
+TASK_REF = {"type": "string", "description": (
+    "Task: partial name or slug. A subtask: 'parent/child' (e.g. 'garage/buy paint'), "
+    "or '#id' as shown in get_task")}
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
@@ -258,7 +271,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Partial task name or full slug"},
+                    "task": TASK_REF,
                 },
                 "required": ["task"],
             },
@@ -302,7 +315,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Partial task name or slug"},
+                    "task": TASK_REF,
                     "note": {"type": "string", "description": "Optional closing note to add to the worklog"},
                 },
                 "required": ["task"],
@@ -314,7 +327,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task":  {"type": "string"},
+                    "task":  TASK_REF,
                     "state": {"type": "string", "enum": ["active","completed","archive"]},
                 },
                 "required": ["task", "state"],
@@ -326,7 +339,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Partial task name or slug"},
+                    "task": TASK_REF,
                 },
                 "required": ["task"],
             },
@@ -337,7 +350,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string"},
+                    "task": TASK_REF,
                     "name": {"type": "string", "description": "New name"},
                 },
                 "required": ["task", "name"],
@@ -349,7 +362,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task":     {"type": "string"},
+                    "task":     TASK_REF,
                     "priority": {"type": ["integer", "string"], "minimum": 1, "maximum": 99},
                 },
                 "required": ["task", "priority"],
@@ -361,7 +374,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task":    {"type": "string"},
+                    "task":    TASK_REF,
                     "project": {"type": "string", "description": "Target project name"},
                 },
                 "required": ["task", "project"],
@@ -373,7 +386,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string"},
+                    "task": TASK_REF,
                     "due":  {"type": "string", "description": "YYYY-MM-DD, or empty string to clear"},
                 },
                 "required": ["task", "due"],
@@ -388,7 +401,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task":     {"type": "string"},
+                    "task":     TASK_REF,
                     "interval": {"type": "integer", "description": "Repeat every N days, or 0 to clear recurrence"},
                 },
                 "required": ["task", "interval"],
@@ -400,7 +413,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string"},
+                    "task": TASK_REF,
                     "note": {"type": "string"},
                 },
                 "required": ["task", "note"],
@@ -412,7 +425,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task":        {"type": "string"},
+                    "task":        TASK_REF,
                     "description": {"type": "string"},
                 },
                 "required": ["task", "description"],
@@ -838,7 +851,7 @@ def _create_task(args: dict) -> tuple[dict, str]:
         try:
             s = db.add_subtask(d["slug"], sub.get("name", ""),
                                priority=sub.get("priority"), due=sub.get("due"))
-            lines.append(f"  + subtask {s['name']} [{s['slug']}]")
+            lines.append(f"  + subtask {s['name']} [{d['slug']}/{s['slug']}]")
         except ValueError as e:
             lines.append(f"  ✗ subtask {sub.get('name', '?')}: {e}")
     return d, "\n".join(lines)
@@ -985,7 +998,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     if name == "add_subtask":
         s = db.add_subtask(args["task"], args["name"],
                            priority=args.get("priority"), due=args.get("due"))
-        return ok(f"Subtask created: {s['name']} [{s['slug']}] under {tag(s['parent'])}")
+        return ok(f"Subtask created: {s['name']} [{s['parent']['slug']}/{s['slug']}] under {tag(s['parent'])}")
 
     # ── done_subtask ──────────────────────────────────────────────────────────
     if name == "done_subtask":

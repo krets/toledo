@@ -48,9 +48,14 @@ def _stamp(text: str) -> str:
 
 def task_to_dict(d: dict) -> dict:
     """Store task dict → the shape the PWA expects."""
+    parent = d.get("parent")
     result = {
         "id":         d["id"],
         "slug":       d["slug"],
+        # What the PWA puts in API paths. A subtask goes by '#id': Flask
+        # decodes %2F before routing, so 'parent/child' can't be a path part.
+        "ref":        f"#{d['id']}" if parent else d["slug"],
+        "parent":     parent,
         "state":      d["state"],
         "priority":   d["priority"],
         "project":    d["project"],
@@ -63,7 +68,8 @@ def task_to_dict(d: dict) -> dict:
     }
     for s in d.get("subtasks", []):
         result["subtasks"][s["state"]].append({
-            "slug": s["slug"], "name": s["name"], "priority": s["priority"], "due": s["due"],
+            "id": s["id"], "slug": s["slug"], "name": s["name"], "priority": s["priority"],
+            "due": s["due"],
         })
     if "description" in d:
         result["description"] = d["description"]
