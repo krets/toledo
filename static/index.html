@@ -312,6 +312,19 @@ body.panel-open #fab{right:436px}
 .sub-delete{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:3px 5px;border-radius:4px;opacity:0;transition:opacity .15s;line-height:1}
 .sub-delete:hover{color:var(--danger)}
 .sub-item:hover .sub-delete{opacity:1}
+.note-compose{margin-bottom:14px}
+.note-compose textarea{
+  width:100%;min-height:64px;resize:vertical;display:block;
+  background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);
+  padding:9px 11px;color:var(--text);font-size:14px;line-height:1.5;font-family:inherit;
+  outline:none;transition:border-color .15s;
+}
+.note-compose textarea:focus{border-color:var(--accent)}
+.note-compose-row{display:flex;align-items:center;gap:10px;margin-top:6px}
+.note-hint{flex:1;font-size:11px;color:var(--muted)}
+@media (hover:none){.note-hint{visibility:hidden}}
+.note-compose .btn{flex:none;padding:7px 14px;font-size:13px}
+.note-compose .btn:disabled{opacity:.45;cursor:default}
 .wlog-entry{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--border)}
 .wlog-entry:last-child{border-bottom:none;margin-bottom:0}
 .wlog-ts{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:500}
@@ -1553,12 +1566,23 @@ App.renderPanel = function() {
         : `<div class="wlog-entry"><div class="wlog-text">${esc(entry.trim())}</div></div>`;
     }).join('');
   }
+  const draft = App.noteDrafts[tk.slug] || '';
+  const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
   body += `<div class="psec">
     <div class="psec-head">
       <span class="psec-title">Notes</span>
-      <button class="psec-act" onclick="App.openSheet('add-note')">+ Add</button>
     </div>
-    <div class="psec-body">${wlogHtml}</div>
+    <div class="psec-body">
+      <div class="note-compose">
+        <textarea id="note-input" placeholder="Add a note…" aria-label="New note"
+          oninput="App.noteInput(this)" onkeydown="App.noteKey(event)">${esc(draft)}</textarea>
+        <div class="note-compose-row">
+          <span class="note-hint">${mod}+Enter to add</span>
+          <button id="note-submit" class="btn btn-p" onclick="App.submitNote()"${draft.trim() ? '' : ' disabled'}>Add note</button>
+        </div>
+      </div>
+      ${wlogHtml}
+    </div>
   </div>`;
 
   // Activity log
@@ -1682,15 +1706,6 @@ App.openSheet = function(type) {
         <div class="btn-row">
           <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
           <button class="btn btn-p" onclick="App.submitNewTask()">Create</button>
-        </div>`,
-    },
-    'add-note': {
-      title: 'Add note',
-      body: () => `
-        <div class="fg"><label>Note</label><textarea id="f-note" placeholder="Write your note…" rows="5"></textarea></div>
-        <div class="btn-row">
-          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
-          <button class="btn btn-p" onclick="App.submitNote()">Add</button>
         </div>`,
     },
     'add-subtask': {
@@ -1859,16 +1874,40 @@ App.submitNewTask = async function() {
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
+// Unsent note text per task, so a re-render or closing the panel keeps it.
+App.noteDrafts = {};
+
+App.noteInput = function(el) {
+  if (App.task) App.noteDrafts[App.task.slug] = el.value;
+  $('note-submit').disabled = !el.value.trim();
+};
+
+App.noteKey = function(e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    App.submitNote();
+  }
+};
+
 App.submitNote = async function() {
-  const text = $('f-note')?.value.trim();
-  if (!text || !App.task) { App.toast('Note text required'); return; }
+  const input = $('note-input'), btn = $('note-submit');
+  const text = input?.value.trim();
+  if (!text || !App.task || btn.disabled) return;
+  const slug = App.task.slug;
+  btn.disabled = true;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.slug)}/note`, { text });
-    App.closeSheet();
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.slug));
-    App.renderPanel();
+    await api('POST', `/api/tasks/${encodeURIComponent(slug)}/note`, { text });
+    delete App.noteDrafts[slug];
     App.toast('✓ Note added');
-  } catch(e) { App.toast('✗ ' + e.message); }
+    const updated = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
+    if (App.task?.slug !== slug) return;  // moved on to another task meanwhile
+    App.task = updated;
+    App.renderPanel();
+    $('note-input')?.focus();
+  } catch(e) {
+    btn.disabled = false;
+    App.toast('✗ ' + e.message);
+  }
 };
 
 App.submitSubtask = async function() {
