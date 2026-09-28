@@ -9,7 +9,8 @@ run it again any time with `toledo setup`.
 
 Usage examples:
     toledo ls
-    toledo new "Fix login bug" -p 10 -c WEB --due 2026-04-15
+    toledo new "Fix login bug" -p 10 -c WEB --due 2026-04-15 -g bugs
+    toledo tag urgent -t "login bug"; toledo ls -g urgent
     toledo ctx "login bug"; toledo note "Reproduced on staging"
     toledo call set_recurrence task="login bug" interval=7
 """
@@ -220,10 +221,18 @@ def cmd_setup(args):
     wizard()
 
 
+def tag_list(values):
+    """Tags from repeated options or arguments, each of which may hold
+    several comma-separated."""
+    tags = [t.strip() for v in values or [] for t in v.split(",") if t.strip()]
+    return tags or None
+
+
 def cmd_status(args):
     out("list_tasks", state="all" if args.all else (args.state or "active"),
-        project=args.project, sort="recent" if args.recent else None,
-        updated_within_days=args.days)
+        project=args.project, tags=tag_list(args.tag),
+        match="all" if args.match_all else None,
+        sort="recent" if args.recent else None, updated_within_days=args.days)
 
 
 def cmd_show(args):
@@ -232,7 +241,8 @@ def cmd_show(args):
 
 def cmd_new(args):
     out("create_task", name=args.name, project=args.project, priority=args.priority,
-        due=args.due, recurrence=args.recur, description=args.description)
+        due=args.due, recurrence=args.recur, description=args.description,
+        tags=tag_list(args.tag))
 
 
 def cmd_done(args):
@@ -270,6 +280,21 @@ def cmd_reprioritize(args):
 
 def cmd_reproject(args):
     out("reproject_task", task=args.task, project=args.project)
+
+
+def cmd_tag(args):
+    out("tag_task", task=task_or_ctx(args), tags=tag_list(args.tags))
+
+
+def cmd_untag(args):
+    out("untag_task", task=task_or_ctx(args), tags=tag_list(args.tags))
+
+
+def cmd_tags(args):
+    if args.rename:
+        out("rename_tag", tag=args.rename[0], name=args.rename[1])
+    else:
+        out("list_tags")
 
 
 def cmd_due(args):
@@ -526,6 +551,9 @@ def main():
     ps.add_argument("-a", "--all", action="store_true", help="All states")
     ps.add_argument("-s", "--state", choices=STATES)
     ps.add_argument("-c", "--project", metavar="NAME")
+    ps.add_argument("-g", "--tag", action="append", metavar="TAG",
+                    help="Only tasks with this tag (repeat or comma-separate for several)")
+    ps.add_argument("--match-all", action="store_true", help="With several tags, require every one")
     ps.add_argument("-r", "--recent", action="store_true", help="Newest updates first")
     ps.add_argument("--days", type=int, help="Only tasks updated within N days")
 
@@ -539,6 +567,7 @@ def main():
     pn.add_argument("-d", "--description")
     pn.add_argument("--due", metavar="YYYY-MM-DD")
     pn.add_argument("--recur", type=int, metavar="DAYS")
+    pn.add_argument("-g", "--tag", action="append", metavar="TAG", help="Tag (repeatable)")
 
     pd = s.add_parser("done", help="Complete a task (advances recurring ones)")
     pd.add_argument("task")
@@ -569,6 +598,18 @@ def main():
     prp = s.add_parser("reproject", help="Move a task to another project")
     prp.add_argument("task")
     prp.add_argument("project")
+
+    ptg = s.add_parser("tag", help="Add tags to a task")
+    ptg.add_argument("tags", nargs="+", metavar="TAG")
+    ptg.add_argument("-t", "--task")
+
+    putg = s.add_parser("untag", help="Remove tags from a task")
+    putg.add_argument("tags", nargs="+", metavar="TAG")
+    putg.add_argument("-t", "--task")
+
+    ptgs = s.add_parser("tags", help="List tags, or rename/merge one")
+    ptgs.add_argument("--rename", nargs=2, metavar=("OLD", "NEW"),
+                      help="Rename OLD to NEW everywhere (merges into NEW if it exists)")
 
     pdu = s.add_parser("due", help="Set due date ('' clears)")
     pdu.add_argument("date", metavar="YYYY-MM-DD")
@@ -651,6 +692,7 @@ def main():
         "rename": cmd_rename,
         "reprioritize": cmd_reprioritize, "pri": cmd_reprioritize,
         "reproject": cmd_reproject,
+        "tag": cmd_tag, "untag": cmd_untag, "tags": cmd_tags,
         "due": cmd_due, "recur": cmd_recur,
         "note": cmd_note, "edit": cmd_edit,
         "sub": cmd_sub, "subdone": cmd_subdone, "subrm": cmd_subrm,
