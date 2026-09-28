@@ -125,6 +125,16 @@ def fmt_journal_detail(j: dict, include_raw: bool = True) -> str:
     return "\n".join(lines)
 
 
+def glossary_warning(j: dict) -> str:
+    """Flag misheard glossary terms left in a saved journal entry."""
+    hits = db.glossary_hits(f"{j['title']}\n{j['raw']}\n{j['summary']}")
+    if not hits:
+        return ""
+    listed = "; ".join(f"'{term}' → {canonical}" for term, canonical in hits)
+    return (f"\n  ⚠ Glossary terms still in the entry: {listed}. "
+            f"Correct them with update_journal (entry #{j['id']}).")
+
+
 def tag(d: dict) -> str:
     """Identify a task in write results so the caller can check the target."""
     return f"'{d['name']}' [{d['slug']}, {d['project']}]"
@@ -530,13 +540,14 @@ async def list_tools() -> list[types.Tool]:
             name="add_journal",
             description=(
                 "Save a journal entry: the user's raw dump as they gave it, plus a revised "
-                "Markdown summary of it. Dated today unless 'date' backfills another day. "
-                "A day may hold several entries."
+                "Markdown summary of it. Correct misheard terms in both against the glossary "
+                "first; the result flags any glossary terms left in. Dated today unless "
+                "'date' backfills another day. A day may hold several entries."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "raw":     {"type": "string", "description": "The dump as the user gave it, unedited"},
+                    "raw":     {"type": "string", "description": "The dump as the user gave it, with only misheard glossary terms corrected"},
                     "summary": {"type": "string", "description": "Revised/summarized version (Markdown)"},
                     "title":   {"type": "string", "description": "Optional short title"},
                     "date":    {"type": "string", "description": "YYYY-MM-DD the entry belongs to (default: today)"},
@@ -1029,7 +1040,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     if name == "add_journal":
         j = db.add_journal(args["raw"], summary=args.get("summary"),
                            title=args.get("title"), date=args.get("date"), source="mcp")
-        return ok(f"Journal saved: {jtag(j)}")
+        return ok(f"Journal saved: {jtag(j)}" + glossary_warning(j))
 
     if name == "list_journal":
         entries = db.list_journal(limit=args.get("limit") or 10, query=args.get("query"),
@@ -1046,7 +1057,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     if name == "update_journal":
         j = db.update_journal(args["entry"], raw=args.get("raw"), summary=args.get("summary"),
                               title=args.get("title"), date=args.get("date"))
-        return ok(f"Journal updated: {jtag(j)}")
+        return ok(f"Journal updated: {jtag(j)}" + glossary_warning(j))
 
     # ── apply_changes ─────────────────────────────────────────────────────────
     if name == "apply_changes":
@@ -1179,13 +1190,16 @@ can ride along on the create).
    - add_journal as the last change, saving today's journal (see step 5).
    Use slugs from the snapshot for existing tasks. Report any ✗ or ⚠ lines in the result.
 
-5. The journal entry saved in step 4 has two parts. raw is the user's dump exactly as they \
-gave it, not cleaned up. summary is your revised write-up in Markdown: what happened, \
-decisions and ideas worth keeping (with glossary terms in their canonical form), and the task \
-changes this session made. Leave the title empty unless the day has an obvious theme, and \
-leave the date to default to today. If a change in step 4 failed, fix the summary with \
-update_journal (entry "latest") after dealing with the failure. Do not render the journal as \
-an artifact unless the user asks; it lives in Toledo.
+5. The journal entry saved in step 4 has two parts, and both are run against the glossary: \
+the snapshot's entries plus the terms resolved in step 2. Replace every misheard term, \
+including near variants of a listed one, with its canonical form (the name itself, not the \
+explanation that follows it). raw is otherwise the user's dump exactly as they gave it, not \
+cleaned up. summary is your revised write-up in Markdown: what happened, decisions and ideas \
+worth keeping, and the task changes this session made. Leave the title empty unless the day \
+has an obvious theme, and leave the date to default to today. The save result flags glossary \
+terms left in the entry; correct them with update_journal. If a change in step 4 failed, \
+likewise fix the summary with update_journal after dealing with the failure. Do not render \
+the journal as an artifact unless the user asks; it lives in Toledo.
 
 6. Close by surfacing a short next-day priority list: the snapshot with this session's \
 changes applied on top, so there is no need to re-read Toledo. Weight it by urgency, not a fixed count — a few Ultra High \

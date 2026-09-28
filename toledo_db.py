@@ -881,6 +881,22 @@ def set_glossary_term(term: str, canonical: str) -> None:
         c.execute("INSERT OR REPLACE INTO glossary VALUES (?, ?)", (term.lower(), canonical))
 
 
+def glossary_hits(text: str) -> list[tuple[str, str]]:
+    """Glossary terms still present in text, as (term, canonical) pairs.
+    A glossary key may list variants ('paragard / perigard'). A variant that
+    also appears in its canonical text is the correct spelling, not a
+    mishearing, so it is not reported."""
+    hits = []
+    for term, canonical in load_glossary().items():
+        for variant in (v.strip() for v in term.split("/")):
+            if not variant:
+                continue
+            pattern = re.compile(rf"(?<!\w){re.escape(variant)}(?!\w)", re.IGNORECASE)
+            if pattern.search(text or "") and not pattern.search(canonical):
+                hits.append((variant, canonical))
+    return hits
+
+
 # ── Journal ───────────────────────────────────────────────────────────────────
 
 _JOURNAL_ORDER = "ORDER BY entry_date DESC, created_at DESC, id DESC"
