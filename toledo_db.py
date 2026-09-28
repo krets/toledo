@@ -343,19 +343,22 @@ def render_worklog(notes: list[dict]) -> str:
 _STATE_ORDER = "CASE state WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END"
 
 
-def _find_row(conn, ref: str):
+def _match(conn, ref: str):
+    """Return (row, partial): the task ref names, plus every row it partially
+    matched with the chosen one first (empty when ref named a task exactly by
+    id, slug, or former slug)."""
     ref = (ref or "").strip()
     if not ref:
-        return None
+        return None, []
     if ref.startswith("#") and ref[1:].isdigit():
         return conn.execute(
             "SELECT * FROM tasks WHERE id = ? AND parent_id IS NULL", (int(ref[1:]),)
-        ).fetchone()
+        ).fetchone(), []
     row = conn.execute(
         "SELECT * FROM tasks WHERE parent_id IS NULL AND slug = ?", (ref.lower(),)
     ).fetchone()
     if row:
-        return row
+        return row, []
     row = conn.execute(
         "SELECT t.* FROM task_aliases a JOIN tasks t ON t.id = a.task_id "
         "WHERE t.parent_id IS NULL AND a.slug = ? "
@@ -363,24 +366,28 @@ def _find_row(conn, ref: str):
         (ref.lower(),),
     ).fetchone()
     if row:
-        return row
+        return row, []
     # Partial match on slug, name, or former slugs; active first, then highest priority.
     needle = _norm(ref)
     if not needle:
-        return None
+        return None, []
     rows = conn.execute(
         f"SELECT * FROM tasks WHERE parent_id IS NULL ORDER BY {_STATE_ORDER}, priority DESC, id"
     ).fetchall()
-    for r in rows:
-        if needle in _norm(r["slug"]) or needle in _norm(r["name"]):
-            return r
+    matches = [r for r in rows if needle in _norm(r["slug"]) or needle in _norm(r["name"])]
+    if matches:
+        return matches[0], matches
     alias = conn.execute(
         "SELECT t.* FROM task_aliases a JOIN tasks t ON t.id = a.task_id "
         "WHERE t.parent_id IS NULL AND a.slug LIKE ? "
         f"ORDER BY {_STATE_ORDER}, t.priority DESC, t.id LIMIT 1",
         (f"%{needle.replace(' ', '-')}%",),
     ).fetchone()
-    return alias
+    return alias, [alias] if alias else []
+
+
+def _find_row(conn, ref: str):
+    return _match(conn, ref)[0]
 
 
 def _resolve(conn, ref: str):
@@ -394,6 +401,12 @@ def find_task(ref: str) -> dict | None:
     with connect() as c:
         row = _find_row(c, ref)
         return _dicts(c, [row])[0] if row else None
+
+
+def other_matches(ref: str) -> list[dict]:
+    """Tasks a partial ref also matched besides the one it resolves to."""
+    with connect() as c:
+        return [_base_dict(r) for r in _match(c, ref)[1][1:]]
 
 
 def resolve_task(ref: str) -> dict:

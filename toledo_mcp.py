@@ -12,6 +12,7 @@ Claude config:
 
 import argparse
 import contextlib
+import json
 from datetime import datetime, timedelta
 
 import mcp.types as types
@@ -101,6 +102,11 @@ def fmt_task_detail(d: dict) -> str:
     return "\n".join(lines)
 
 
+def tag(d: dict) -> str:
+    """Identify a task in write results so the caller can check the target."""
+    return f"'{d['name']}' [{d['slug']}, {d['project']}]"
+
+
 def ok(text: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=text)]
 
@@ -117,13 +123,19 @@ SERVER_INSTRUCTIONS = """\
 Toledo is the user's task manager. Tasks are addressed by partial name or slug.
 Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low).
 
+For more than one write, send them together in a single apply_changes call. Every \
+write result names the task it touched and warns when a partial name matched several \
+tasks, so there is no need to re-read a task to check a write.
+
 Toledo ships guided-session prompts:
 - morning_planning: start-of-day "what should I work on" session
 - end_of_day_dump: end-of-day brain dump reconciled against tasks and the glossary
 - periodic_audit: infrequent deep audit of tasks, categories, and goals
 
 When the user asks for one of these sessions (e.g. "let's plan my day", "end of day \
-dump"), fetch its full instructions first and follow them.
+dump"), fetch its full instructions first and follow them. The fetched prompt ends with \
+a snapshot of the current tasks, projects, and glossary, so the session needs no \
+further reads to get started.
 
 Claude.ai's web interface does not support MCP prompts natively, so fetch them with \
 the get_prompt tool (name = the prompt name; list_prompts shows what exists). Clients \
@@ -134,6 +146,14 @@ the list_resources and get_resource tools.
 """
 
 server = Server("toledo", instructions=SERVER_INSTRUCTIONS)
+
+# Write tools that apply_changes accepts as ops.
+BATCH_OPS = {
+    "create_task", "done_task", "move_task", "delete_task", "rename_task",
+    "reprioritize_task", "reproject_task", "set_due", "set_recurrence", "add_note",
+    "update_description", "add_subtask", "done_subtask", "delete_subtask",
+    "update_glossary", "add_project", "remove_project", "rename_project", "merge_projects",
+}
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -175,7 +195,10 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="create_task",
-            description="Create a new task in the active state.",
+            description=(
+                "Create a new task in the active state, optionally with an initial "
+                "worklog note and subtasks."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -185,6 +208,16 @@ async def list_tools() -> list[types.Tool]:
                     "due":         {"type": "string", "description": "Due date YYYY-MM-DD"},
                     "recurrence":  {"type": "integer", "description": "Repeat every N days"},
                     "description": {"type": "string", "description": "Task description (Markdown)"},
+                    "note":        {"type": "string", "description": "Initial note for the worklog"},
+                    "subtasks":    {"type": "array", "description": "Subtasks to add: names, or {name, priority, due} objects",
+                                    "items": {"anyOf": [
+                                        {"type": "string"},
+                                        {"type": "object", "properties": {
+                                            "name":     {"type": "string"},
+                                            "priority": {"type": "integer"},
+                                            "due":      {"type": "string"},
+                                        }, "required": ["name"]},
+                                    ]}},
                 },
                 "required": ["name"],
             },
@@ -466,6 +499,36 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="apply_changes",
+            description=(
+                "Apply several writes in one call. Each change is {\"op\": <write tool name>, "
+                "...that tool's arguments}, e.g. {\"op\": \"set_due\", \"task\": \"dentist\", "
+                "\"due\": \"2026-10-02\"}. Ops: " + ", ".join(sorted(BATCH_OPS)) + ". "
+                "Changes run in order and each commits on its own: a failure does not roll "
+                "back earlier changes or stop later ones. A create_task change may carry "
+                "\"as\": \"<label>\", and later changes can then use \"$<label>\" as their "
+                "task; they are skipped if that create failed. Returns one ✓/✗/skipped line "
+                "per change."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "changes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": {"type": "string", "enum": sorted(BATCH_OPS)},
+                                "as": {"type": "string", "description": "create_task only: label for later changes"},
+                            },
+                            "required": ["op"],
+                        },
+                    },
+                },
+                "required": ["changes"],
+            },
+        ),
+        types.Tool(
             name="list_resources",
             description=(
                 "List Toledo's MCP resources (uri, name, description) — status, projects, "
@@ -555,19 +618,107 @@ def _normalize_args(name: str, args: dict) -> dict:
 # before we could normalize them, so required args are checked in call_tool.
 @server.call_tool(validate_input=False)
 async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
-    args = _normalize_args(name, arguments or {})
     try:
-        missing = [k for k in await _required_for(name) if k not in args]
-        if missing:
-            raise ValueError(
-                f"Missing required argument(s) for '{name}': {', '.join(missing)}. "
-                f"Got: {', '.join(sorted(args)) or '(none)'}"
-            )
-        return await _dispatch(name, args)
+        return ok(await _run(name, arguments or {}))
     except ValueError as e:
         return err(str(e))
     except Exception as e:
         return err(f"Unexpected error in '{name}': {e}")
+
+
+async def _prepare(name: str, arguments: dict) -> dict:
+    args = _normalize_args(name, arguments)
+    missing = [k for k in await _required_for(name) if k not in args]
+    if missing:
+        raise ValueError(
+            f"Missing required argument(s) for '{name}': {', '.join(missing)}. "
+            f"Got: {', '.join(sorted(args)) or '(none)'}"
+        )
+    return args
+
+
+async def _run(name: str, arguments: dict) -> str:
+    """Run one tool call and return its text, raising on failure."""
+    args = await _prepare(name, arguments)
+    # Look for other partial matches before the write, which may rename the task.
+    others = db.other_matches(args["task"]) if name in BATCH_OPS and "task" in args else []
+    text = (await _dispatch(name, args))[0].text
+    if others:
+        listed = ", ".join(f"{tag(o)} ({o['state']})" for o in others[:3])
+        more = f" and {len(others) - 3} more" if len(others) > 3 else ""
+        text += (f"\n  ⚠ '{args['task']}' also matches {listed}{more}. "
+                 f"Use a slug if you meant one of those.")
+    return text
+
+
+def _create_task(args: dict) -> tuple[dict, str]:
+    task_name = args["name"].strip()
+    d = db.create_task(
+        task_name,
+        project=args.get("project"),
+        priority=args.get("priority"),
+        due=args.get("due") or None,
+        recurrence=args.get("recurrence") or None,
+        description=args.get("description") or f"# {task_name}\n\n_No description._\n",
+    )
+    lines = [f"Created: {tag(d)}"]
+    # The task exists from here on, so extras report their own failures
+    # rather than failing the create.
+    if (args.get("note") or "").strip():
+        try:
+            db.add_note(d["slug"], args["note"])
+            lines.append("  + note")
+        except ValueError as e:
+            lines.append(f"  ✗ note: {e}")
+    for sub in args.get("subtasks") or []:
+        sub = {"name": sub} if isinstance(sub, str) else sub
+        try:
+            s = db.add_subtask(d["slug"], sub.get("name", ""),
+                               priority=sub.get("priority"), due=sub.get("due"))
+            lines.append(f"  + subtask {s['name']} [{s['slug']}]")
+        except ValueError as e:
+            lines.append(f"  ✗ subtask {sub.get('name', '?')}: {e}")
+    return d, "\n".join(lines)
+
+
+async def _apply_changes(changes) -> str:
+    if isinstance(changes, str):
+        changes = json.loads(changes)
+    if not isinstance(changes, list) or not changes:
+        raise ValueError("changes must be a non-empty list of {op, ...args} objects")
+    labels: dict[str, str | None] = {}   # label → slug, or None if its create failed
+    lines, failed = [], 0
+    for i, change in enumerate(changes, 1):
+        change = dict(change) if isinstance(change, dict) else {}
+        op = change.pop("op", None) or change.pop("tool", None)
+        label = change.pop("as", None)
+        head = f"{i}. {op or '?'}"
+        try:
+            if op not in BATCH_OPS:
+                raise ValueError(f"unknown op '{op}'")
+            ref = change.get("task")
+            if isinstance(ref, str) and ref.startswith("$"):
+                if ref[1:] not in labels:
+                    raise ValueError(f"'{ref}' is not the label of an earlier create_task")
+                if labels[ref[1:]] is None:
+                    lines.append(f"– {head}: skipped, its create_task ({ref}) failed")
+                    failed += 1
+                    continue
+                change["task"] = labels[ref[1:]]
+            if op == "create_task":
+                d, text = _create_task(await _prepare(op, change))
+                if label:
+                    labels[label] = d["slug"]
+            else:
+                text = await _run(op, change)
+            lines.append(f"✓ {head}: {text}")
+        except Exception as e:
+            if label:
+                labels[label] = None
+            lines.append(f"✗ {head}: {e}")
+            failed += 1
+    summary = f"{len(changes) - failed} of {len(changes)} changes applied"
+    return summary + ("" if not failed else f", {failed} failed or skipped") + ":\n" + "\n".join(lines)
 
 
 async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
@@ -607,89 +758,81 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
 
     # ── create_task ───────────────────────────────────────────────────────────
     if name == "create_task":
-        task_name = args["name"].strip()
-        d = db.create_task(
-            task_name,
-            project=args.get("project"),
-            priority=args.get("priority"),
-            due=args.get("due") or None,
-            recurrence=args.get("recurrence") or None,
-            description=args.get("description") or f"# {task_name}\n\n_No description._\n",
-        )
-        return ok(f"Created: {d['slug']}")
+        return ok(_create_task(args)[1])
 
     # ── done_task ─────────────────────────────────────────────────────────────
     if name == "done_task":
         r = db.complete_task(args["task"], note=args.get("note"))
         if r["recurring"]:
-            return ok(f"↻ Recurring task advanced. Next due: {r['next_due']}")
-        return ok(f"✓ Completed: {r['task']['slug']}")
+            return ok(f"↻ Recurring task advanced: {tag(r['task'])}. Next due: {r['next_due']}")
+        return ok(f"✓ Completed: {tag(r['task'])}")
 
     # ── move_task ─────────────────────────────────────────────────────────────
     if name == "move_task":
         to_state = args["state"]
-        if db.resolve_task(args["task"])["state"] == to_state:
-            return ok(f"Already in '{to_state}'")
+        d = db.resolve_task(args["task"])
+        if d["state"] == to_state:
+            return ok(f"{tag(d)} is already in '{to_state}'")
         d = db.move_task(args["task"], to_state)
-        return ok(f"→ Moved '{d['slug']}' to {to_state}")
+        return ok(f"→ Moved {tag(d)} to {to_state}")
 
     # ── delete_task ───────────────────────────────────────────────────────────
     if name == "delete_task":
         d = db.delete_task(args["task"])
-        return ok(f"🗑 Deleted: {d['slug']}")
+        return ok(f"🗑 Deleted: {tag(d)}")
 
     # ── rename_task ───────────────────────────────────────────────────────────
     if name == "rename_task":
         d = db.rename_task(args["task"], args["name"])
-        return ok(f"Renamed → {d['name']}  [{d['slug']}]")
+        return ok(f"Renamed → {tag(d)}")
 
     # ── reprioritize_task ─────────────────────────────────────────────────────
     if name == "reprioritize_task":
         d = db.set_priority(args["task"], args["priority"])
-        return ok(f"Priority → {d['priority']} ({pri_label(d['priority'])})  [{d['slug']}]")
+        return ok(f"Priority → {d['priority']} ({pri_label(d['priority'])}): {tag(d)}")
 
     # ── reproject_task ────────────────────────────────────────────────────────
     if name == "reproject_task":
         d = db.set_project(args["task"], args["project"])
-        return ok(f"Project → {d['project']} ({db.project_name(d['project'])})  [{d['slug']}]")
+        return ok(f"Project → {d['project']} ({db.project_name(d['project'])}): {tag(d)}")
 
     # ── set_due ───────────────────────────────────────────────────────────────
     if name == "set_due":
         d = db.set_due(args["task"], args.get("due"))
-        return ok(f"Due date set to {d['due']}" if d["due"] else "Due date cleared")
+        return ok(f"Due {d['due']}: {tag(d)}" if d["due"] else f"Due date cleared: {tag(d)}")
 
     # ── set_recurrence ────────────────────────────────────────────────────────
     if name == "set_recurrence":
         d = db.set_recurrence(args["task"], args.get("interval"))
         if d["recurrence"]:
-            return ok(f"Recurrence set to every {d['recurrence']} days")
-        return ok("Recurrence cleared")
+            return ok(f"Recurs every {d['recurrence']} days: {tag(d)}")
+        return ok(f"Recurrence cleared: {tag(d)}")
 
     # ── add_note ──────────────────────────────────────────────────────────────
     if name == "add_note":
         d = db.add_note(args["task"], args["note"])
-        return ok(f"Note added to {d['slug']}")
+        return ok(f"Note added to {tag(d)}")
 
     # ── update_description ────────────────────────────────────────────────────
     if name == "update_description":
         d = db.set_description(args["task"], args.get("description", ""))
-        return ok(f"Description updated for {d['slug']}")
+        return ok(f"Description updated for {tag(d)}")
 
     # ── add_subtask ───────────────────────────────────────────────────────────
     if name == "add_subtask":
         s = db.add_subtask(args["task"], args["name"],
                            priority=args.get("priority"), due=args.get("due"))
-        return ok(f"Subtask created: {s['slug']}")
+        return ok(f"Subtask created: {s['name']} [{s['slug']}] under {tag(s['parent'])}")
 
     # ── done_subtask ──────────────────────────────────────────────────────────
     if name == "done_subtask":
         s = db.set_subtask_state(args["task"], args["subtask"], "completed", first_match=True)
-        return ok(f"✓ Subtask done: {s['slug']}")
+        return ok(f"✓ Subtask done: {s['name']} [{s['slug']}] under {tag(s['parent'])}")
 
     # ── delete_subtask ────────────────────────────────────────────────────────
     if name == "delete_subtask":
         s = db.delete_subtask(args["task"], args["subtask"])
-        return ok(f"🗑 Deleted subtask: {s['slug']} ({s['state']})")
+        return ok(f"🗑 Deleted subtask: {s['name']} [{s['slug']}, {s['state']}] under {tag(s['parent'])}")
 
     # ── search_tasks ──────────────────────────────────────────────────────────
     if name == "search_tasks":
@@ -781,6 +924,10 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         canonical = args["canonical"].strip()
         db.set_glossary_term(term, canonical)
         return ok(f"Glossary: '{term}' → '{canonical}'")
+
+    # ── apply_changes ─────────────────────────────────────────────────────────
+    if name == "apply_changes":
+        return ok(await _apply_changes(args["changes"]))
 
     # ── list_resources / get_resource (tool mirrors of the resources capability) ─
     if name == "list_resources":
@@ -880,28 +1027,30 @@ Follow this sequence:
 Let them dump everything: what they did, what came up, half-formed ideas, names, decisions. \
 Do not interrupt to ask clarifying questions during this phase.
 
-2. Once they're done, read the toledo://glossary resource. Scan their dump for proper nouns, \
+2. Once they're done, check the dump against the glossary in the snapshot below. Scan it for proper nouns, \
 project names, and terms that don't clearly match a glossary entry or an existing Toledo \
 task/project name. Collect every ambiguous term into ONE batched round of clarifying \
-questions — never one at a time. For each term the user resolves, call update_glossary to \
-persist the mapping (term → canonical form) so it is never asked about again. The glossary is \
+questions — never one at a time. For each term the user resolves, record an update_glossary \
+change (term → canonical form) for step 4 so it is never asked about again. The glossary is \
 healed via that tool, not by editing this prompt.
 
-3. Call list_tasks (state=active) to get current open tasks. Cross-reference what the user \
-mentioned against that list. Where it's ambiguous whether something is done, still in \
+3. Cross-reference what the user mentioned against the active tasks in the snapshot. Where it's ambiguous whether something is done, still in \
 progress, or abandoned, batch those into one more round of status questions.
 
-4. Write back to Toledo from the answers:
+4. Write back to Toledo from the answers in ONE apply_changes call:
+   - update_glossary for each resolved term.
    - done_task for anything completed.
    - add_note on tasks that progressed but aren't done, summarizing what happened.
-   - create_task for anything mentioned that isn't already tracked.
+   - create_task for anything mentioned that isn't already tracked (its note and subtasks \
+can ride along on the create).
+   Use slugs from the snapshot for existing tasks. Report any ✗ or ⚠ lines in the result.
 
 5. Generate a dated Markdown artifact ("Toledo Journal — YYYY-MM-DD") summarizing the raw dump \
 and the outcomes of this session, as a journal stub until an Obsidian integration replaces this \
 step. Rendering that artifact is on you, the calling agent — the Toledo server has no part in it.
 
-6. Close by surfacing a short next-day priority list pulled from the now-updated Toledo state \
-(list_tasks and/or upcoming_tasks). Weight it by urgency, not a fixed count — a few Ultra High \
+6. Close by surfacing a short next-day priority list: the snapshot with this session's \
+changes applied on top, so there is no need to re-read Toledo. Weight it by urgency, not a fixed count — a few Ultra High \
 or overdue items beats padding out a round number.
 """
 
@@ -910,16 +1059,16 @@ You are running Toledo's morning planning session ("what should I work on"). Cha
 come up during the session are held and committed together at the end, not applied live. Tell \
 the user this at the start, in one line. Follow this sequence:
 
-1. Call list_tasks (state=active) and derive the distinct categories/projects actually \
-present — do not hard-code a category list, since categories get renamed, split, or merged \
-during the periodic audit. Use list_projects for display names.
+1. From the active tasks in the snapshot below, derive the distinct categories/projects \
+actually present — do not hard-code a category list, since categories get renamed, split, or \
+merged during the periodic audit. The snapshot's project list has display names.
 
 2. Ask the user which category/lane to focus on today (for example freelance income, \
 household, personal projects). If a dedicated goals project/category exists (quarter-level \
 targets set during the periodic audit), you may surface relevant goals to help them choose.
 
-3. Within the chosen category, call list_tasks filtered to that project — use sort=recent \
-where it helps — and surface tasks weighted by urgency: approaching deadlines and recurring \
+3. Within the chosen category, take that project's tasks from the snapshot and surface them \
+weighted by urgency: approaching deadlines and recurring \
 tasks nearing their cycle date first. Do NOT hard-filter out undated tasks; many chores and \
 goals have no due date and are still worth surfacing.
 
@@ -934,22 +1083,23 @@ slug keeps resolving afterwards.
    - Coalesce as you go: the latest value wins per field on a task (two due dates become \
 one). A done supersedes earlier due/priority edits on the same task but keeps its notes. \
 For a recurring task, done only advances its cycle, so say that in the summary.
-   - Overlay the pending list on anything you surface. list_tasks still shows the stored \
+   - Overlay the pending list on anything you surface. The snapshot still shows the stored \
 state, so do not suggest a task the user already called done, and show moved dates as moved.
    - Restate the pending list briefly when it grows, or when the user switches category, so \
 it survives a long conversation.
 
-5. Where useful, check recency (sort=recent / updated_within_days) within the selected \
+5. Where useful, check recency (each snapshot line's upd: timestamp) within the selected \
 category so a stale-looking task doesn't get silently skipped.
 
 6. Commit when the user marks the session done ("done", "wrap up", "that's it"). Show the \
 coalesced pending list and ask once for confirmation, letting them drop or edit items. On \
-confirmation, apply it as ordinary tool calls:
-   - Create new tasks first, then apply edits to existing ones, and apply any rename last \
-for each task.
-   - Do not roll back and do not stop on a failure. Skip only changes that depended on the \
-failed one (for example a note for a task whose create_task failed), and keep going.
-   - Finish with a short succeeded / failed list, and offer to retry the failures.
+confirmation, apply it in ONE apply_changes call:
+   - Create new tasks first (with their notes and subtasks on the create, or with "as" \
+labels for later changes to use), then edits to existing ones, and any rename last for each task.
+   - apply_changes does not roll back or stop on a failure, and skips changes that name a \
+failed create's label.
+   - Finish with a short succeeded / failed list from its result, including any ⚠ \
+ambiguous-match warnings, and offer to retry the failures.
    If the user signals they are leaving (thanks, bye, going quiet) while changes are still \
 pending, ask whether to commit them before they go. With nothing pending, there is nothing to \
 do. Uncommitted changes are lost when the conversation ends, and the evening dump reads \
@@ -961,17 +1111,20 @@ You are running Toledo's periodic audit and goals refinement (roughly every 3–
 This is a structural review, not daily triage — day-to-day drift is already handled by the \
 morning planning prompt, which commits its changes at the end of each session. Follow this sequence:
 
-1. Call list_tasks (state=all) and review for staleness: tasks that no longer matter, \
+1. Review every task in the snapshot below for staleness: tasks that no longer matter, \
 duplicates, or things quietly superseded. Confirm with the user before archiving (move_task \
 to archive) or permanently deleting (delete_task) anything.
 
-2. Call list_projects and review the category structure itself: rename, split, merge, or \
+2. Review the category structure itself (the snapshot's project list): rename, split, merge, or \
 otherwise refine categories to make daily use easier. The current categories are not \
 guaranteed to be optimal long-term — don't assume they are. Use rename_project to rename a \
 code in place (carries every task/subtask in it along), merge_projects to fold one category \
 into another, and add_project/remove_project for brand-new or now-empty categories.
 
 3. Reassign individually miscategorized tasks to better-fitting categories via reproject_task.
+
+Apply the changes confirmed in each of the steps above with one apply_changes call per step, \
+not one call per change.
 
 4. Open a capture window: ask the user for anything new — tasks, ideas, projects — that \
 surfaced during this review. Similar in spirit to the evening brain dump, but focused on \
@@ -1027,7 +1180,26 @@ async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPr
     }
     if name not in prompts:
         raise ValueError(f"Unknown prompt: {name}")
-    return types.GetPromptResult(messages=[_prompt_message(prompts[name])])
+    # The audit reviews every state; the daily sessions only need active tasks.
+    state = "all" if name == "periodic_audit" else "active"
+    return types.GetPromptResult(messages=[_prompt_message(prompts[name] + await _snapshot(state))])
+
+
+async def _snapshot(state: str) -> str:
+    """Current Toledo state appended to a prompt, so a session starts without reads."""
+    now = datetime.now()
+    tasks    = (await _dispatch("list_tasks", {"state": state}))[0].text
+    projects = (await _dispatch("list_projects", {}))[0].text
+    glossary = await read_resource(types.AnyUrl("toledo://glossary"))
+    return (
+        f"\n\n---\n# Toledo snapshot — {now:%A %Y-%m-%d %H:%M}\n"
+        "Fetched along with these instructions. It stands in for list_tasks, "
+        "list_projects, and the glossary resource at the start of the session; reuse it "
+        "instead of re-reading, and track your own writes on top of it.\n\n"
+        f"## Tasks ({state})\n{tasks}\n\n"
+        f"## Projects\n{projects}\n\n"
+        f"## Glossary\n{glossary}\n"
+    )
 
 
 # ── Starlette / Streamable HTTP transport ──────────────────────────────────────
