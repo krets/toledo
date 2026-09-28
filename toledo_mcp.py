@@ -1209,61 +1209,43 @@ or overdue items beats padding out a round number.
 """
 
 MORNING_PLANNING_PROMPT = """\
-You are running Toledo's morning planning session ("what should I work on"). Changes that \
-come up during the session are held and committed together at the end, not applied live. Tell \
-the user this at the start, in one line. Follow this sequence:
+You are running Toledo's morning planning session ("what should I work on"). Its job is to \
+reorient the user for the day, not to interview them. Follow this sequence:
 
-1. From the active tasks in the snapshot below, derive the distinct categories/projects \
-actually present — do not hard-code a category list, since categories get renamed, split, or \
-merged during the periodic audit. The snapshot's project list has display names.
+1. Open with a short status brief built from the snapshot below. Give the broad picture: how \
+many tasks are overdue and roughly where they sit, which areas are hot, and anything with a \
+deadline landing in the next few days. If a goals project exists (quarter-level targets set \
+during the periodic audit), use it as framing for what matters, in a line at most. Group by \
+the projects actually present in the snapshot rather than a hard-coded list, since categories \
+get renamed, split, or merged during the periodic audit; the snapshot's project list has \
+display names. Refer to tasks in generic shorthand ("the visa paperwork", "two chores") \
+rather than their full stored titles; the user knows what is on the list, so enumerating it \
+is noise. Keep it terse.
+   - Do NOT hard-filter out undated tasks; many chores and goals have no due date and are \
+still worth mentioning when relevant.
+   - Use each snapshot line's upd: timestamp so a stale-looking task isn't silently skipped.
 
-2. Ask the user which category/lane to focus on today (for example freelance income, \
-household, personal projects). If a dedicated goals project/category exists (quarter-level \
-targets set during the periodic audit), you may surface relevant goals to help them choose.
+2. After the brief, hand over with an open door ("Where do you want to start?") and let the \
+user steer. Do not offer a menu of categories or otherwise script the conversation. Follow \
+where they take it, surfacing the relevant tasks weighted by urgency when asked.
 
-3. Within the chosen category, take that project's tasks from the snapshot and surface them \
-weighted by urgency: approaching deadlines and recurring \
-tasks nearing their cycle date first. Do NOT hard-filter out undated tasks; many chores and \
-goals have no due date and are still worth surfacing.
-
-4. Stay interactive throughout the conversation, but HOLD changes instead of writing them. \
-If the user mentions in passing that something is already done, a date should move, a task \
-needs a note, a priority or project should change, or something new should be tracked, do NOT \
-call any write tool yet (done_task, set_due, add_note, reprioritize_task, reproject_task, \
-rename_task, create_task, add_subtask, ...). Record it in a running pending-changes list \
-kept in the conversation, and acknowledge it in a few words.
+3. Apply changes as they come up. When the user says something is done, a date should move, \
+a task needs a note, a priority or project should change, or something new should be tracked, \
+write it straight away without asking for confirmation and without narrating the write. \
+When several changes come up together, send them in one apply_changes call.
    - Refer to tasks by partial name or slug. Only rename changes a task's slug, and the old \
 slug keeps resolving afterwards.
-   - Coalesce as you go: the latest value wins per field on a task (two due dates become \
-one). A done supersedes earlier due/priority edits on the same task but keeps its notes. \
-For a recurring task, done only advances its cycle, so say that in the summary.
-   - Overlay the pending list on anything you surface. The snapshot still shows the stored \
-state, so do not suggest a task the user already called done, and show moved dates as moved.
-   - Restate the pending list briefly when it grows, or when the user switches category, so \
-it survives a long conversation.
-
-5. Where useful, check recency (each snapshot line's upd: timestamp) within the selected \
-category so a stale-looking task doesn't get silently skipped.
-
-6. Commit when the user marks the session done ("done", "wrap up", "that's it"). Show the \
-coalesced pending list and ask once for confirmation, letting them drop or edit items. On \
-confirmation, apply it in ONE apply_changes call:
-   - Create new tasks first (with their notes and subtasks on the create, or with "as" \
-labels for later changes to use), then edits to existing ones, and any rename last for each task.
-   - apply_changes does not roll back or stop on a failure, and skips changes that name a \
-failed create's label.
-   - Finish with a short succeeded / failed list from its result, including any ⚠ \
-ambiguous-match warnings, and offer to retry the failures.
-   If the user signals they are leaving (thanks, bye, going quiet) while changes are still \
-pending, ask whether to commit them before they go. With nothing pending, there is nothing to \
-do. Uncommitted changes are lost when the conversation ends, and the evening dump reads \
-Toledo's stored state.
+   - For a recurring task, done only advances its cycle.
+   - The snapshot shows the state before the session; track your own writes on top of it \
+so you do not suggest a task already called done or show a moved date as unmoved.
+   - Mention a write only if it failed or matched more than one task (a ✗ or ⚠ line in \
+the result), and ask how to resolve it.
 """
 
 PERIODIC_AUDIT_PROMPT = """\
 You are running Toledo's periodic audit and goals refinement (roughly every 3–6 months). \
 This is a structural review, not daily triage — day-to-day drift is already handled by the \
-morning planning prompt, which commits its changes at the end of each session. Follow this sequence:
+morning planning prompt, which applies its changes as they come up. Follow this sequence:
 
 1. Review every task in the snapshot below for staleness: tasks that no longer matter, \
 duplicates, or things quietly superseded. Confirm with the user before archiving (move_task \
@@ -1310,9 +1292,9 @@ async def list_prompts() -> list[types.Prompt]:
         types.Prompt(
             name="morning_planning",
             description=(
-                "Morning 'what should I work on' session: pick a category, surface "
-                "urgency-weighted tasks in it, and hold changes that come up in "
-                "conversation, committing them together once you mark the session done."
+                "Morning 'what should I work on' session: a short status brief on "
+                "what is overdue and landing soon, then an open conversation the user "
+                "steers, with changes applied as they come up."
             ),
         ),
         types.Prompt(
