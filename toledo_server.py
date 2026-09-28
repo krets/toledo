@@ -59,6 +59,7 @@ def task_to_dict(d: dict) -> dict:
         "state":      d["state"],
         "priority":   d["priority"],
         "project":    d["project"],
+        "tags":       d.get("tags", []),
         "name":       d["name"],
         "due":        d["due"],
         "recurrence": d["recurrence"],
@@ -136,7 +137,9 @@ def list_tasks():
     if state_filter in db.STATES:
         states = [state_filter]
 
-    tasks = [task_to_dict(d) for d in db.list_tasks(states, project_filter)]
+    tags = request.args.get("tag")
+    match_all = request.args.get("match") == "all"
+    tasks = [task_to_dict(d) for d in db.list_tasks(states, project_filter, tags, match_all)]
     tasks.sort(key=lambda x: (-x["priority"], x["due"] or "9999"))
     return jsonify(tasks)
 
@@ -158,6 +161,7 @@ def create_task():
         due=data.get("due"),
         recurrence=data.get("recur"),
         description=data.get("description"),
+        tags=data.get("tags"),
     )
     return jsonify(task_to_dict(d)), 201
 
@@ -217,6 +221,16 @@ def task_move(slug):
 def task_reproject(slug):
     data = request.json or {}
     return jsonify(task_to_dict(db.set_project(slug, data.get("project"))))
+
+
+@app.route("/api/tasks/<slug>/tags", methods=["POST"])
+def task_tag(slug):
+    return jsonify(task_to_dict(db.tag_task(slug, (request.json or {}).get("tags"))))
+
+
+@app.route("/api/tasks/<slug>/tags", methods=["DELETE"])
+def task_untag(slug):
+    return jsonify(task_to_dict(db.untag_task(slug, (request.json or {}).get("tags"))))
 
 
 @app.route("/api/tasks/<slug>/reprioritize", methods=["POST"])
@@ -334,6 +348,22 @@ def remove_project(code):
     return jsonify({"deleted": True})
 
 
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+@app.route("/api/tags", methods=["GET"])
+def list_tags():
+    return jsonify(db.list_tags())
+
+
+@app.route("/api/tags/<tag>", methods=["PATCH"])
+def rename_tag(tag):
+    data, err, code = require_json("name")
+    if err:
+        return err, code
+    db.rename_tag(tag, data["name"])
+    return jsonify(db.list_tags())
+
+
 # ── Journal ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/journal", methods=["GET"])
@@ -423,7 +453,8 @@ def get_status():
         for tk in tasks:
             due_str = f", Due: {tk['due']}" if tk.get('due') else ""
             recur_str = f", Recur: {tk['recurrence']}d" if tk.get('recurrence') else ""
-            tasks_md += f"- **{tk['name']}** (`{tk['slug']}`)\n  - Project: {tk['project']}, Priority: {tk['priority']}{due_str}{recur_str}\n"
+            tags_str = f", Tags: {' '.join('#' + t for t in tk['tags'])}" if tk.get('tags') else ""
+            tasks_md += f"- **{tk['name']}** (`{tk['slug']}`)\n  - Project: {tk['project']}, Priority: {tk['priority']}{due_str}{recur_str}{tags_str}\n"
 
     status_text = f"""# TOLEDO SYSTEM STATUS
 **Current Time:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -451,6 +482,8 @@ You can ask the Toledo AI to perform the following actions. When responding, pro
 - **Set Due Date**: `set_due(task, due="YYYY-MM-DD")`
 - **Change Priority**: `reprioritize(task, priority)`
 - **Change Project**: `reproject(task, project_code)`
+- **Tag Task**: `tag_task(task, tags)`
+- **Untag Task**: `untag_task(task, tags)`
 - **Edit Description**: `edit_desc(task, text)`
 - **Rename Task**: `rename_task(task, new_name)`
 - **Add Subtask**: `add_subtask(parent_task, name, priority=50, due=None)`
@@ -679,7 +712,8 @@ CHATTABLE_TOOLS = [
                     "project": {"type": "string", "description": "Project code, default GEN"},
                     "priority": {"type": ["integer", "string"], "description": "1-99, higher = more important, or a label like High; default 50"},
                     "due": {"type": "string", "description": "YYYY-MM-DD"},
-                    "recur": {"type": "integer", "description": "Days for recurrence"}
+                    "recur": {"type": "integer", "description": "Days for recurrence"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Free-form tags"}
                 },
                 "required": ["name"]
             }
@@ -794,6 +828,36 @@ CHATTABLE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "tag_task",
+            "description": "Add free-form tags to a task (subtasks share their parent's tags)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["task", "tags"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "untag_task",
+            "description": "Remove tags from a task",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["task", "tags"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "move_task",
             "description": "Move a task to a different state (active, completed, archive)",
             "parameters": {
@@ -817,7 +881,7 @@ def execute_chat_tool(name, args):
                                priority=args.get("priority"), due=args.get("due"),
                                recurrence=args.get("recur"),
                                description=f"# {args['name']}\n\n_Created via Chat._\n",
-                               source=src)
+                               tags=args.get("tags"), source=src)
             return f"Success: Created task {d['slug']}"
 
         if name == "done_task":
@@ -853,6 +917,11 @@ def execute_chat_tool(name, args):
         if name == "delete_subtask":
             s = db.delete_subtask(args["task"], args["subtask"], source=src)
             return f"Success: Deleted subtask {s['slug']} ({s['state']})"
+
+        if name in ("tag_task", "untag_task"):
+            write = db.tag_task if name == "tag_task" else db.untag_task
+            d = write(args["task"], args.get("tags"), source=src)
+            return f"Success: {d['slug']} now has tags {', '.join(d['tags']) or '(none)'}"
 
         if name == "move_task":
             d = db.move_task(args["task"], args["state"], source=src)
@@ -946,6 +1015,8 @@ INSTRUCTIONS:
    - If the user mentions a project by name (e.g., "General", "Work"), map it to the corresponding code (e.g., "GEN", "JOB").
    - If the user's request implies a project (e.g., "misc", "random"), use your best judgment to map it to an existing project like "GEN".
    - Default to "GEN" if no project is specified or inferred.
+4. Besides its one project, a task can carry any number of free-form tags (see each task's "tags").
+   Use tag_task / untag_task to change them; reuse existing tags rather than near-duplicates.
 3. Always confirm the details of the action you performed (e.g., "I've created the task 'Fly a kite' in the General (GEN) project").
 """
 

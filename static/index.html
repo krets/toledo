@@ -164,6 +164,15 @@ body.panel-open #fab{right:436px}
 .proj-tag{
   font-size:11px;font-weight:600;padding:2px 7px;border-radius:4px;flex-shrink:0;
 }
+.tag-chip{
+  font-size:11px;color:var(--accent);background:var(--accent-dim);
+  padding:1px 7px;border-radius:10px;white-space:nowrap;cursor:pointer;
+  border:none;font-family:inherit;line-height:1.5;
+}
+.tag-chip:hover{outline:1px solid var(--accent)}
+.tag-chip .x{margin-left:4px;opacity:.7}
+.tag-list{display:flex;flex-wrap:wrap;gap:5px;min-width:0}
+.tag-suggest{background:var(--surface2);color:var(--muted)}
 .task-name{font-size:14px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card-meta{display:flex;align-items:center;margin-top:3px;gap:6px}
 .meta-right{display:flex;gap:6px;align-items:center;margin-left:auto;flex-shrink:0}
@@ -236,6 +245,8 @@ body.panel-open #fab{right:436px}
 }
 .proj-code{font-size:13px;font-weight:700;min-width:48px;color:var(--accent)}
 .proj-name{flex:1;font-size:14px}
+.tag-count{font-size:12px;color:var(--muted);white-space:nowrap}
+.icon-btn.edit:hover{color:var(--accent)}
 .icon-btn{background:none;border:none;color:var(--muted);cursor:pointer;padding:6px;border-radius:4px;line-height:1;font-size:16px;transition:color .15s}
 .icon-btn:hover{color:var(--danger)}
 
@@ -493,6 +504,10 @@ body.panel-open #fab{right:436px}
         <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
         Edit Projects
       </div>
+      <div class="ham-item" onclick="App.setView('tags')">
+        <svg viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+        Edit Tags
+      </div>
       <div class="ham-item" onclick="App.setView('archive')">
         <svg viewBox="0 0 24 24"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         Archive
@@ -578,13 +593,16 @@ function hexToRgba(hex, alpha) {
 
 // ── App state ─────────────────────────────────────────────────────────────────
 const App = {
-  view: 'tasks',   // 'tasks' | 'search' | 'projects' | 'archive'
+  view: 'tasks',   // 'tasks' | 'search' | 'projects' | 'tags' | 'archive'
   tasks: [],
   projects: {},
+  tags: [],        // [{tag, tasks, active}] for every tag in use
   // State filter — multi-select, default active only
   stateFilters: new Set(['active']),
   // Client-side filters
   projFilters: new Set(),
+  tagFilters:  new Set(),
+  tagMatchAll: false,       // true: a task needs every selected tag, not any
   dueFilter:   'any',       // 'any' | 'overdue' | 'today' | '7' | '14' | '30'
   priFilter:   'any',       // 'any' | 'high' | 'medium' | 'low'
   // Detail panel
@@ -669,7 +687,7 @@ App.init = async function() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') App.checkVersion();
   });
-  await Promise.all([App.loadTasks(), App.loadProjects()]);
+  await Promise.all([App.loadTasks(), App.loadProjects(), App.loadTags()]);
   App.renderMain();
 };
 
@@ -700,6 +718,10 @@ App.loadProjects = async function() {
   try { App.projects = await api('GET', '/api/projects'); } catch {}
 };
 
+App.loadTags = async function() {
+  try { App.tags = await api('GET', '/api/tags'); } catch {}
+};
+
 // ── Client-side filtering ─────────────────────────────────────────────────────
 App.filteredTasks = function() {
   let tasks = App.tasks;
@@ -711,6 +733,13 @@ App.filteredTasks = function() {
 
   if (App.projFilters.size > 0) {
     tasks = tasks.filter(t => App.projFilters.has(t.project));
+  }
+
+  if (App.tagFilters.size > 0) {
+    const want = [...App.tagFilters];
+    tasks = tasks.filter(t => App.tagMatchAll
+      ? want.every(g => t.tags.includes(g))
+      : want.some(g => t.tags.includes(g)));
   }
 
   if (App.dueFilter !== 'any') {
@@ -748,6 +777,7 @@ App.setView = function(v) {
   if (v === 'settings') { App.loadSettings(); return; }
   if (v === 'journal') { App.loadJournal().then(() => App.renderMain()); return; }
   if (v === 'activity') { App.loadActivity().then(() => App.renderMain()); return; }
+  if (v === 'tags') { App.loadTags().then(() => App.renderMain()); return; }
   App.loadTasks().then(() => App.renderMain());
 };
 
@@ -780,6 +810,11 @@ App.renderMain = function() {
       break;
     case 'projects':
       el.innerHTML = App.buildProjectsView();
+      fab.style.display = 'none';
+      back.style.display = 'block';
+      break;
+    case 'tags':
+      el.innerHTML = App.buildTagsView();
       fab.style.display = 'none';
       back.style.display = 'block';
       break;
@@ -904,6 +939,7 @@ App.buildFilterBar = function() {
   const sf = App.stateFilters;
   const hasStateFilter = !(sf.size === 1 && sf.has('active'));  // non-default
   const hasProjFilter  = App.projFilters.size > 0;
+  const hasTagFilter   = App.tagFilters.size > 0;
   const hasDueFilter   = App.dueFilter !== 'any';
   const hasPriFilter   = App.priFilter !== 'any';
 
@@ -928,6 +964,25 @@ App.buildFilterBar = function() {
     const dot = `<span class="fdd-dot" style="background:${projColor(code)}"></span>`;
     const check = on ? '<span class="fdd-check">✓</span>' : '';
     projDd += `<div class="fdd-item${on ? ' on' : ''}" onclick='App.toggleProjFilter(${JSON.stringify(code)})'>${dot}${esc(projName(code))}${check}</div>`;
+  });
+
+  // Tag dropdown (multi-select, any/all)
+  const tagLabel = hasTagFilter
+    ? (App.tagFilters.size === 1 ? '#' + [...App.tagFilters][0]
+       : `${App.tagFilters.size} tags (${App.tagMatchAll ? 'all' : 'any'})`)
+    : 'Tags';
+  let tagDd = `<div class="fdd-item${!hasTagFilter ? ' on' : ''}" onclick="App.clearTagFilters()">All Tags</div>`;
+  if (App.tagFilters.size > 1) {
+    tagDd += `<div class="fdd-item" onclick="App.toggleTagMatch()">Match ${App.tagMatchAll ? 'all' : 'any'} of these
+      <span class="fdd-check" style="font-weight:500;font-size:12px">switch to ${App.tagMatchAll ? 'any' : 'all'}</span></div>`;
+  }
+  if (!App.tags.length) {
+    tagDd += `<div class="fdd-item" style="color:var(--muted);cursor:default">No tags yet</div>`;
+  }
+  App.tags.forEach(({ tag, active }) => {
+    const on = App.tagFilters.has(tag);
+    const check = on ? '<span class="fdd-check">✓</span>' : `<span class="fdd-check" style="color:var(--muted);font-weight:400;font-size:12px">${active}</span>`;
+    tagDd += `<div class="fdd-item${on ? ' on' : ''}" onclick='App.toggleTagFilter(${JSON.stringify(tag)})'>#${esc(tag)}${check}</div>`;
   });
 
   // Due date dropdown
@@ -960,6 +1015,12 @@ App.buildFilterBar = function() {
       <div class="filter-dropdown" id="proj-dd">${projDd}</div>
     </div>
     <div class="filter-wrap">
+      <button class="filter-btn${hasTagFilter ? ' active' : ''}" onclick="App.toggleDropdown('tag-dd',event)">
+        ${esc(tagLabel)} ${chevron}
+      </button>
+      <div class="filter-dropdown" id="tag-dd">${tagDd}</div>
+    </div>
+    <div class="filter-wrap">
       <button class="filter-btn${hasDueFilter ? ' active' : ''}" onclick="App.toggleDropdown('due-dd',event)">
         ${esc(dueLabel)} ${chevron}
       </button>
@@ -972,7 +1033,7 @@ App.buildFilterBar = function() {
       <div class="filter-dropdown" id="pri-dd">${priDd}</div>
     </div>`;
 
-  if (hasStateFilter || hasProjFilter || hasDueFilter || hasPriFilter) {
+  if (hasStateFilter || hasProjFilter || hasTagFilter || hasDueFilter || hasPriFilter) {
     html += `<button class="filter-clear" onclick="App.clearAllFilters()">Clear</button>`;
   }
   return html + '</div>';
@@ -981,9 +1042,10 @@ App.buildFilterBar = function() {
 App.activeFiltersInfo = function() {
   const shown = App.filteredTasks().length;
   const hasProjFilter = App.projFilters.size > 0;
+  const hasTagFilter  = App.tagFilters.size > 0;
   const hasDueFilter  = App.dueFilter !== 'any';
   const hasPriFilter  = App.priFilter !== 'any';
-  if (!hasProjFilter && !hasDueFilter && !hasPriFilter) return '';
+  if (!hasProjFilter && !hasTagFilter && !hasDueFilter && !hasPriFilter) return '';
   return `<div style="padding:4px 14px;font-size:11px;color:var(--muted)">${shown} task${shown !== 1 ? 's' : ''} shown</div>`;
 };
 
@@ -1077,6 +1139,32 @@ App.clearProjFilters = function() {
   App.renderMain();
 };
 
+App.toggleTagFilter = function(tag) {
+  if (App.tagFilters.has(tag)) App.tagFilters.delete(tag);
+  else App.tagFilters.add(tag);
+  App.renderMain();
+  setTimeout(() => { const dd = $('tag-dd'); if (dd) dd.classList.add('open'); }, 0);
+};
+
+App.toggleTagMatch = function() {
+  App.tagMatchAll = !App.tagMatchAll;
+  App.renderMain();
+  setTimeout(() => { const dd = $('tag-dd'); if (dd) dd.classList.add('open'); }, 0);
+};
+
+App.clearTagFilters = function() {
+  App.tagFilters.clear();
+  App.renderMain();
+};
+
+// A tag chip on a card: show only tasks with that tag.
+App.filterByTag = function(tag, e) {
+  if (e) e.stopPropagation();
+  App.tagFilters = new Set([tag]);
+  if (App.view !== 'tasks' && App.view !== 'archive') { App.setView('tasks'); return; }
+  App.renderMain();
+};
+
 App.setDueFilter = function(v) {
   App.dueFilter = v;
   App.renderMain();
@@ -1090,6 +1178,7 @@ App.setPriFilter = function(v) {
 App.clearAllFilters = function() {
   App.stateFilters = new Set(['active']);
   App.projFilters.clear();
+  App.tagFilters.clear();
   App.dueFilter = 'any';
   App.priFilter = 'any';
   App.renderMain();
@@ -1106,6 +1195,11 @@ App.buildCard = function(t, showState) {
   const subHtml   = totalSubs > 0
     ? `<span class="sub-count">${t.subtasks.completed.length}/${totalSubs} subtasks</span>` : '';
 
+  const tagHtml = (t.tags || []).length
+    ? `<span class="tag-list">${t.tags.map(g =>
+        `<button class="tag-chip" onclick='App.filterByTag(${JSON.stringify(g)}, event)' title="Show #${esc(g)} tasks">#${esc(g)}</button>`
+      ).join('')}</span>` : '';
+
   const pl = priLabel(t.priority);
   const pColor = projColor(t.project);
   const pBg = hexToRgba(pColor, 0.15);
@@ -1117,7 +1211,7 @@ App.buildCard = function(t, showState) {
       <span class="proj-tag" style="background:${pBg};color:${pColor}">${esc(projName(t.project))}</span>
       <span class="task-name">${esc(t.name)}</span>
     </div>
-    <div class="card-meta">${recHtml}${stateHtml}<span class="meta-right">${subHtml}${dueHtml}</span></div>
+    <div class="card-meta">${tagHtml}${recHtml}${stateHtml}<span class="meta-right">${subHtml}${dueHtml}</span></div>
   </div>`;
 };
 
@@ -1128,7 +1222,7 @@ App.buildSearchView = function() {
       value="${esc(App.query)}" oninput="App.onSearch(this.value)" autocomplete="off">
   </div>`;
   if (!App.query) {
-    return html + `<div class="empty"><div class="empty-icon">🔍</div><p>Search names, descriptions, and notes</p></div>`;
+    return html + `<div class="empty"><div class="empty-icon">🔍</div><p>Search names, tags, descriptions, and notes</p></div>`;
   }
   if (!App.results.length) {
     return html + `<div class="empty"><p>No results for "${esc(App.query)}"</p></div>`;
@@ -1185,6 +1279,36 @@ App.deleteProject = async function(code) {
     await App.loadProjects();
     App.renderMain();
     App.toast(`Removed ${code}`);
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+// ── Tags view ─────────────────────────────────────────────────────────────────
+App.buildTagsView = function() {
+  let html = `<div class="view-header">Edit Tags</div>`;
+  if (!App.tags.length) {
+    return html + `<div class="empty"><div class="empty-icon">🏷️</div><p>No tags yet. Add them from a task's Tags pill.</p></div>`;
+  }
+  html += `<div style="background:var(--surface);border-radius:var(--r);margin:8px 10px;border:1px solid var(--border)">`;
+  App.tags.forEach(({ tag, tasks, active }) => {
+    html += `<div class="proj-row">
+      <button class="tag-chip" onclick='App.filterByTag(${JSON.stringify(tag)})' title="Show #${esc(tag)} tasks">#${esc(tag)}</button>
+      <span class="proj-name"></span>
+      <span class="tag-count">${active} active · ${tasks} total</span>
+      <button class="icon-btn edit" onclick='App.renameTag(${JSON.stringify(tag)})' title="Rename or merge">✎</button>
+    </div>`;
+  });
+  return html + `</div><p style="padding:4px 16px;font-size:12px;color:var(--muted)">Renaming a tag to one that already exists merges them.</p>`;
+};
+
+App.renameTag = async function(tag) {
+  const name = prompt(`Rename #${tag} to:`, tag);
+  if (!name || !name.trim() || name.trim() === tag) return;
+  try {
+    App.tags = await api('PATCH', `/api/tags/${encodeURIComponent(tag)}`, { name: name.trim() });
+    if (App.tagFilters.delete(tag)) App.tagFilters.add(name.trim().replace(/^#/, '').toLowerCase().split(/\s+/).join('-'));
+    App.renderMain();
+    App.toast('✓ Tag renamed');
+    App.loadTasks();
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
@@ -1457,10 +1581,11 @@ const ACTIVITY_ACTIONS = {
   scheduled:   ['Due & recurrence', 'due_date_set,due_set,due_cleared,recurrence_set,recurrence_cleared'],
   priority:    ['Priority', 'reprioritized'],
   moved:       ['Moved project', 'reprojected,project_renamed,project_merged,project_recolored'],
+  tags:        ['Tags', 'tagged,untagged,tag_renamed,tag_merged'],
 };
-const ACTIVITY_SCOPES = { '': 'Everything', task: 'Tasks', project: 'Projects', journal: 'Journal',
+const ACTIVITY_SCOPES = { '': 'Everything', task: 'Tasks', project: 'Projects', tag: 'Tags', journal: 'Journal',
   glossary: 'Glossary', context: 'Current task', system: 'System' };
-const SCOPE_TAGS = { project: 'Project', journal: 'Journal', glossary: 'Glossary',
+const SCOPE_TAGS = { project: 'Project', tag: 'Tag', journal: 'Journal', glossary: 'Glossary',
   context: 'Current task', system: 'System' };
 
 // One event as a sentence. f holds the event's fields: the flat entries of a
@@ -1475,7 +1600,12 @@ function describeEvent(action, f, scope) {
   switch (action) {
     case 'created':
       return 'Created' + (f.project ? ` in ${proj(f.project)}` : '') +
-        (f.priority != null ? ` · ${priLabel(f.priority)}` : '') + (f.due ? ` · due ${f.due}` : '');
+        (f.priority != null ? ` · ${priLabel(f.priority)}` : '') + (f.due ? ` · due ${f.due}` : '') +
+        (f.tags ? ' · ' + hashTags(f.tags) : '');
+    case 'tagged':             return 'Tagged ' + hashTags(f.tags);
+    case 'untagged':           return 'Untagged ' + hashTags(f.tags);
+    case 'tag_renamed':        return `Renamed to #${f.new} · ${f.tasks} task${f.tasks == 1 ? '' : 's'}`;
+    case 'tag_merged':         return `Merged into #${f.new} · ${f.tasks} task${f.tasks == 1 ? '' : 's'}`;
     case 'state_changed':      return state[f.to_state] || `Moved to ${f.to_state}`;
     case 'completed':          return 'Completed';
     case 'completed_recurring':
@@ -1521,6 +1651,10 @@ function describeEvent(action, f, scope) {
   const extras = Object.entries(f).filter(([k]) => k !== 'source' && !k.endsWith('_id'))
     .map(([k, v]) => `${k}=${v}`).join('  ');
   return action.replace(/_/g, ' ') + (extras ? ` · ${extras}` : '');
+}
+
+function hashTags(tags) {
+  return (tags || []).map(g => '#' + g).join(' ');
 }
 
 function sourceTag(src) {
@@ -1614,6 +1748,8 @@ App.activityRow = function(e) {
     if (e.action !== 'journal_deleted') open = `App.openJournal(${JSON.stringify(Number(e.ref))})`;
   } else if (e.scope === 'glossary') {
     target = `<span class="act-target">${esc(e.ref)}</span>`;
+  } else if (e.scope === 'tag') {
+    target = `<span class="act-target">#${esc(e.ref)}</span>`;
   } else if (e.scope === 'system') {
     target = `<span class="act-target">Toledo</span>`;
   } else {
@@ -1711,6 +1847,17 @@ App.renderPanel = function() {
     style="border-color:${hexToRgba(tkProjColor,.3)}">
     <span class="lbl">Project</span>
     <span class="val" style="color:${tkProjColor}">${esc(projName(tk.project))}</span>
+    <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+  </button>`;
+
+  // Tags pill; a subtask shows its parent's
+  const tagVal = tk.tags.length
+    ? `<span class="val">${esc(hashTags(tk.tags))}</span>`
+    : `<span class="val" style="color:var(--muted)">none</span>`;
+  metaPills += tk.parent
+    ? `<span class="meta-pill" style="cursor:default" title="Set by the parent task"><span class="lbl">Tags</span>${tagVal}</span>`
+    : `<button class="meta-pill" onclick="App.openSheet('edit-tags')" title="Edit tags">
+    <span class="lbl">Tags</span>${tagVal}
     <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
   </button>`;
 
@@ -1944,6 +2091,10 @@ App.openSheet = function(type) {
             </select>
           </div>
         </div>
+        <div class="fg"><label>Tags</label>
+          <input id="f-tags" type="text" autocomplete="off" placeholder="errands, weekend" list="tag-options">
+          ${App.tagDatalist()}
+        </div>
         <div class="fg"><label>Due date</label><input id="f-due" type="date"></div>
         <div class="fg"><label>Recurrence (days, 0 = none)</label><input id="f-recur" type="number" value="0" min="0"></div>
         <div class="fg"><label>Description</label><textarea id="f-desc" placeholder="Markdown supported…"></textarea></div>
@@ -2011,6 +2162,10 @@ App.openSheet = function(type) {
           <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
           <button class="btn btn-p" onclick="App.submitReproject()">Save</button>
         </div>`,
+    },
+    'edit-tags': {
+      title: 'Tags',
+      body: () => App.tagSheetBody(),
     },
     'edit-desc': {
       title: 'Edit description',
@@ -2110,10 +2265,11 @@ App.submitNewTask = async function() {
       project:     ($('f-proj')?.value || 'GEN').toUpperCase(),
       due:         $('f-due')?.value || null,
       description: $('f-desc')?.value.trim() || null,
+      tags:        $('f-tags')?.value || null,
     });
     App.closeSheet();
     App.toast('✓ Task created');
-    await App.loadTasks();
+    await Promise.all([App.loadTasks(), App.loadTags()]);
     App.renderMain();
   } catch(e) { App.toast('✗ ' + e.message); }
 };
@@ -2192,6 +2348,60 @@ App.setPriQuick = function(val) {
 App.syncPriQuick = function() {
   const v = $('f-pri')?.value;
   document.querySelectorAll('#sheet-body [data-pri]').forEach(b => b.classList.toggle('on', b.dataset.pri === v));
+};
+
+// Existing tags for an input's autocomplete. Typing after a comma still
+// completes, since the browser matches the whole value; good enough here.
+App.tagDatalist = function(exclude = []) {
+  return `<datalist id="tag-options">${App.tags.filter(g => !exclude.includes(g.tag))
+    .map(g => `<option value="${esc(g.tag)}">`).join('')}</datalist>`;
+};
+
+App.tagSheetBody = function() {
+  const tags = App.task?.tags || [];
+  const current = tags.length
+    ? tags.map(g => `<button class="tag-chip" onclick='App.untagTask(${JSON.stringify(g)})' title="Remove">#${esc(g)}<span class="x">✕</span></button>`).join('')
+    : `<span style="color:var(--muted);font-size:13px">No tags yet</span>`;
+  const others = App.tags.filter(g => !tags.includes(g.tag));
+  const suggest = others.length
+    ? `<div class="fg"><label>Existing tags</label><div class="tag-list">${others.map(g =>
+        `<button class="tag-chip tag-suggest" onclick='App.tagTask(${JSON.stringify(g.tag)})'>+ #${esc(g.tag)}</button>`).join('')}</div></div>`
+    : '';
+  return `
+    <div class="fg"><label>On this task</label><div class="tag-list">${current}</div></div>
+    <div class="fg"><label>Add tags</label>
+      <div style="display:flex;gap:6px">
+        <input id="f-tags" type="text" autocomplete="off" placeholder="errands, weekend" list="tag-options"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();App.tagTask()}" style="flex:1">
+        <button class="btn btn-p" style="flex:0 0 auto" onclick="App.tagTask()">Add</button>
+      </div>
+      ${App.tagDatalist(tags)}
+    </div>
+    ${suggest}
+    <div class="btn-row"><button class="btn btn-s" onclick="App.closeSheet()">Done</button></div>`;
+};
+
+// Apply a tag change to the open task and redraw the sheet in place.
+App.changeTags = async function(method, tags) {
+  if (!App.task) return;
+  try {
+    App.task = { ...App.task, ...await api(method, `/api/tasks/${encodeURIComponent(App.task.ref)}/tags`, { tags }) };
+    await App.loadTags();
+    $('sheet-body').innerHTML = App.tagSheetBody();
+    $('f-tags')?.focus();
+    App.renderPanel();
+    App.loadTasks().then(() => App.renderMain());
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.tagTask = function(tag) {
+  const tags = tag || $('f-tags')?.value.trim();
+  if (!tags) return;
+  App.changeTags('POST', tags);
+};
+
+App.untagTask = function(tag) {
+  App.changeTags('DELETE', tag);
 };
 
 App.submitReproject = async function() {
