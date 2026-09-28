@@ -55,8 +55,9 @@ def fmt_task_line(d: dict) -> str:
         total = len(d["subtasks"])
         subs  = f"  [{done}/{total} subtasks]"
     upd = f"  upd:{d['updated'][:16].replace('T', ' ')}" if d.get("updated") else ""
+    tags = "".join(f" #{t}" for t in d.get("tags") or [])
     return (
-        f"[{d['pri_label']:10s}] [{d['project_name']:12s}] {d['name']}"
+        f"[{d['pri_label']:10s}] [{d['project_name']:12s}] {d['name']}{tags}"
         f"  ({d['slug']}){due}{rec}{subs}{upd}"
     )
 
@@ -69,7 +70,7 @@ _ID_KEYS = {"note_id", "history_id", "subtask_id", "into"}
 
 
 def fmt_event_fields(fields: dict) -> str:
-    rest = {k: db.project_name(v) if k in _PROJECT_KEYS else v
+    rest = {k: db.project_name(v) if k in _PROJECT_KEYS else ",".join(v) if isinstance(v, list) else v
             for k, v in fields.items() if k not in _ID_KEYS}
     return "  " + "  ".join(f"{k}={v}" for k, v in rest.items()) if rest else ""
 
@@ -86,6 +87,8 @@ def fmt_event_line(e: dict) -> str:
         target = e["data"].pop("name", None) or db.project_name(e["ref"])
     elif e["scope"] == "journal":
         target = f"journal #{e['ref']}"
+    elif e["scope"] == "tag":
+        target = f"tag #{e['ref']}"
     else:
         target = e["ref"] or e["scope"]
     return f"{ts}  {e['action']:<20} {target}{fmt_event_fields(e['data'])}"
@@ -99,6 +102,8 @@ def fmt_task_detail(d: dict) -> str:
         f"Priority: {d['priority']} — {d['pri_label']}",
         f"Project:  {d['project_name']}",
     ]
+    if d.get("tags"):
+        lines.append(f"Tags:     {' '.join('#' + t for t in d['tags'])}")
     if d.get("parent"):
         lines.insert(2, f"Parent:   {d['parent']['name']}  ({d['parent']['slug']})")
     if d.get("updated"):
@@ -195,6 +200,8 @@ Toledo is the user's task manager. Tasks are addressed by partial name or slug, 
 Every task tool also works on a subtask, addressed as 'parent/child' or by the '#id' get_task shows.
 Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low). Writes also accept the
 labels Ultra High, High, Med-High, Medium, Med-Low, Low and Very Low, in any case.
+Besides its one project, a task can carry any number of free-form tags (lowercase, shown as #tag),
+set with tag_task / untag_task and filtered with list_tasks. Tags are not priority labels.
 
 For more than one write, send them together in a single apply_changes call. Every \
 write result names the task it touched and warns when a partial name matched several \
@@ -207,7 +214,7 @@ Toledo ships guided-session prompts:
 
 When the user asks for one of these sessions (e.g. "let's plan my day", "end of day \
 dump"), fetch its full instructions first and follow them. The fetched prompt ends with \
-a snapshot of the current tasks, projects, and glossary, so the session needs no \
+a snapshot of the current tasks, projects, tags, and glossary, so the session needs no \
 further reads to get started.
 
 Claude.ai's web interface does not support MCP prompts natively, so fetch them with \
@@ -218,7 +225,7 @@ Toledo also keeps the user's journal: dated entries holding the raw dump as give
 a revised summary. Save with add_journal (it can ride along in apply_changes), and read \
 back with list_journal / get_journal. The newest entries come first.
 
-Resources (status, projects, active tasks, glossary, recent journal) are likewise \
+Resources (status, projects, tags, active tasks, glossary, recent journal) are likewise \
 available through the list_resources and get_resource tools.
 """
 
@@ -231,7 +238,7 @@ BATCH_OPS = {
     "reprioritize_task", "reproject_task", "set_due", "set_recurrence", "add_note",
     "update_description", "add_subtask", "done_subtask", "delete_subtask",
     "update_glossary", "add_project", "remove_project", "rename_project", "merge_projects",
-    "add_journal", "update_journal",
+    "tag_task", "untag_task", "rename_tag", "add_journal", "update_journal",
 }
 
 # ── Tool definitions ──────────────────────────────────────────────────────────
@@ -240,6 +247,10 @@ TASK_REF = {"type": "string", "description": (
     "Task: partial name or slug. A subtask: 'parent/child' (e.g. 'garage/buy paint'), "
     "or '#id' as shown in get_task")}
 
+TAGS = {"type": ["array", "string"], "items": {"type": "string"},
+        "description": "Tags, e.g. [\"errands\", \"weekend\"] or \"errands, weekend\"; "
+                       "stored lowercase, a leading # is dropped"}
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
@@ -247,7 +258,7 @@ async def list_tools() -> list[types.Tool]:
             name="list_tasks",
             description=(
                 "List tasks. By default returns active tasks. "
-                "Filter by state (active/completed/archive/all) and/or project. "
+                "Filter by state (active/completed/archive/all), project, and/or tags. "
                 "Each task shows its last-updated timestamp; sort or filter by recency "
                 "with 'sort' and 'updated_within_days'."
             ),
@@ -258,6 +269,9 @@ async def list_tools() -> list[types.Tool]:
                                 "description": "Filter by task state (default: active)"},
                     "project": {"type": "string",
                                 "description": "Filter by project name (e.g. Chores)"},
+                    "tags":    {**TAGS, "description": "Only tasks with any of these tags"},
+                    "match":   {"type": "string", "enum": ["any", "all"],
+                                "description": "'all' keeps only tasks with every tag given (default: any)"},
                     "sort":    {"type": "string", "enum": ["default", "recent"],
                                 "description": "'recent' sorts by last-updated, newest first (default: creation order)"},
                     "updated_within_days": {"type": "integer",
@@ -287,6 +301,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "name":        {"type": "string", "description": "Task name"},
                     "project":     {"type": "string", "description": "Project name (e.g. Chores). Defaults to General"},
+                    "tags":        TAGS,
                     "priority":    {"type": ["integer", "string"], "description": "Priority 1–99 (higher = more important) or a label like High or Med-Low. Default 50"},
                     "due":         {"type": "string", "description": "Due date YYYY-MM-DD"},
                     "recurrence":  {"type": "integer", "description": "Repeat every N days"},
@@ -378,6 +393,24 @@ async def list_tools() -> list[types.Tool]:
                     "project": {"type": "string", "description": "Target project name"},
                 },
                 "required": ["task", "project"],
+            },
+        ),
+        types.Tool(
+            name="tag_task",
+            description="Add tags to a task. Tags it already has are left alone. Subtasks share their parent's tags.",
+            inputSchema={
+                "type": "object",
+                "properties": {"task": TASK_REF, "tags": TAGS},
+                "required": ["task", "tags"],
+            },
+        ),
+        types.Tool(
+            name="untag_task",
+            description="Remove tags from a task.",
+            inputSchema={
+                "type": "object",
+                "properties": {"task": TASK_REF, "tags": TAGS},
+                "required": ["task", "tags"],
             },
         ),
         types.Tool(
@@ -506,6 +539,26 @@ async def list_tools() -> list[types.Tool]:
             name="list_projects",
             description="List all projects with their names, colors, and active task counts.",
             inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="list_tags",
+            description="List every tag in use with its active and total task counts.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="rename_tag",
+            description=(
+                "Rename a tag on every task that has it. Renaming to a tag already in use "
+                "merges the two."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tag":  {"type": "string", "description": "Current tag"},
+                    "name": {"type": "string", "description": "New tag"},
+                },
+                "required": ["tag", "name"],
+            },
         ),
         types.Tool(
             name="add_project",
@@ -658,7 +711,7 @@ async def list_tools() -> list[types.Tool]:
                     "until":   {"type": "string", "description": "Latest date (inclusive) or timestamp"},
                     "task":    {"type": "string", "description": "Only this task and its subtasks"},
                     "project": {"type": "string", "description": "Only this project's tasks and events"},
-                    "scope":   {"type": "string", "description": "task, project, glossary, journal, "
+                    "scope":   {"type": "string", "description": "task, project, tag, glossary, journal, "
                                                                  "context, or system; comma-separate several"},
                     "action":  {"type": "string", "description": "e.g. state_changed, deleted; comma-separate several"},
                     "limit":   {"type": "integer", "default": 50, "description": "Max events (default 50)"},
@@ -751,7 +804,6 @@ _ARG_ALIASES_ALL = {
     "task_id": "task", "task_name": "task", "slug": "task", "id": "task",
 }
 _ARG_ALIASES = {
-    "create_task": {"title": "name"},
     "rename_task": {"new_name": "name", "title": "name"},
     "add_subtask": {"title": "name"},
     "set_due":     {"date": "due", "due_date": "due"},
@@ -764,6 +816,11 @@ _ARG_ALIASES = {
                        "new_code": "name", "new_name": "name"},
     "merge_projects": {"from_code": "from_project", "from": "from_project",
                        "into_code": "into_project", "into": "into_project"},
+    "list_tasks":     {"tag": "tags"},
+    "create_task":    {"title": "name", "tag": "tags"},
+    "tag_task":       {"tag": "tags"},
+    "untag_task":     {"tag": "tags"},
+    "rename_tag":     {"old": "tag", "from": "tag", "new": "name", "to": "name", "new_name": "name"},
 }
 
 _required_args: dict[str, list[str]] | None = None
@@ -836,6 +893,7 @@ def _create_task(args: dict) -> tuple[dict, str]:
         due=args.get("due") or None,
         recurrence=args.get("recurrence") or None,
         description=args.get("description") or f"# {task_name}\n\n_No description._\n",
+        tags=args.get("tags"),
     )
     lines = [f"Created: {tag(d)}"]
     # The task exists from here on, so extras report their own failures
@@ -909,7 +967,8 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             raise ValueError(f"Invalid state '{state_filter}'")
         states   = db.STATES if state_filter == "all" else [state_filter]
         projects = db.list_projects()
-        all_tasks = [decorate(d, projects) for d in db.list_tasks(states, project_filter)]
+        all_tasks = [decorate(d, projects) for d in db.list_tasks(
+            states, project_filter, args.get("tags"), match_all=args.get("match") == "all")]
         lines  = []
         for state in states:
             dicts = [d for d in all_tasks if d["state"] == state]
@@ -971,6 +1030,12 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     if name == "reproject_task":
         d = db.set_project(args["task"], args["project"])
         return ok(f"Project → {tag(d)}")
+
+    # ── tag_task / untag_task ─────────────────────────────────────────────────
+    if name in ("tag_task", "untag_task"):
+        write = db.tag_task if name == "tag_task" else db.untag_task
+        d = write(args["task"], args["tags"])
+        return ok(f"Tags → {' '.join('#' + t for t in d['tags']) or '(none)'}: {tag(d)}")
 
     # ── set_due ───────────────────────────────────────────────────────────────
     if name == "set_due":
@@ -1067,6 +1132,19 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         for code, val in sorted(projects.items(), key=lambda p: p[1]["name"].lower()):
             lines.append(f"{val['name']:<20}  {active.get(code, 0):>6}  {val['color']}")
         return ok("\n".join(lines))
+
+    # ── list_tags / rename_tag ────────────────────────────────────────────────
+    if name == "list_tags":
+        tags = db.list_tags()
+        if not tags:
+            return ok("No tags in use.")
+        lines = [f"{'TAG':<20}  {'ACTIVE':>6}  {'TOTAL':>5}", "-" * 35]
+        lines += [f"#{t['tag']:<19}  {t['active']:>6}  {t['tasks']:>5}" for t in tags]
+        return ok("\n".join(lines))
+
+    if name == "rename_tag":
+        old, new, count = db.rename_tag(args["tag"], args["name"])
+        return ok(f"Renamed #{old} → #{new} on {count} task(s)")
 
     # ── add_project ───────────────────────────────────────────────────────────
     if name == "add_project":
@@ -1180,6 +1258,12 @@ async def list_resources() -> list[types.Resource]:
             mimeType="text/plain",
         ),
         types.Resource(
+            uri="toledo://tags",
+            name="Toledo Tags",
+            description="Tags in use with their active and total task counts",
+            mimeType="text/plain",
+        ),
+        types.Resource(
             uri="toledo://tasks/active",
             name="Active Tasks",
             description="All currently active tasks",
@@ -1210,6 +1294,10 @@ async def read_resource(uri: types.AnyUrl) -> str:
 
     if uri_str == "toledo://projects":
         result = await _dispatch("list_projects", {})
+        return result[0].text
+
+    if uri_str == "toledo://tags":
+        result = await _dispatch("list_tags", {})
         return result[0].text
 
     if uri_str == "toledo://tasks/active":
@@ -1300,7 +1388,7 @@ user steer. Do not offer a menu of categories or otherwise script the conversati
 where they take it, surfacing the relevant tasks weighted by urgency when asked.
 
 3. Apply changes as they come up. When the user says something is done, a date should move, \
-a task needs a note, a priority or project should change, or something new should be tracked, \
+a task needs a note, a priority, project or tag should change, or something new should be tracked, \
 write it straight away without asking for confirmation and without narrating the write. \
 When several changes come up together, send them in one apply_changes call.
    - Refer to tasks by partial name or slug. Only rename changes a task's slug, and the old \
@@ -1328,6 +1416,10 @@ category (its tasks stay in it), merge_projects to fold one category into anothe
 add_project/remove_project for brand-new or now-empty categories.
 
 3. Reassign individually miscategorized tasks to better-fitting categories via reproject_task.
+Review the tags too (the snapshot's tag list): fold near-duplicates together with rename_tag, \
+and add or drop tags on tasks with tag_task / untag_task where that makes filtering easier. \
+Tags cut across projects, so a theme that spans several categories may be better as a tag \
+than as a new project.
 
 Apply the changes confirmed in each of the steps above with one apply_changes call per step, \
 not one call per change.
@@ -1396,14 +1488,16 @@ async def _snapshot(state: str) -> str:
     now = datetime.now()
     tasks    = (await _dispatch("list_tasks", {"state": state}))[0].text
     projects = (await _dispatch("list_projects", {}))[0].text
+    tags     = (await _dispatch("list_tags", {}))[0].text
     glossary = await read_resource(types.AnyUrl("toledo://glossary"))
     return (
         f"\n\n---\n# Toledo snapshot — {now:%A %Y-%m-%d %H:%M}\n"
         "Fetched along with these instructions. It stands in for list_tasks, "
-        "list_projects, and the glossary resource at the start of the session; reuse it "
+        "list_projects, list_tags, and the glossary resource at the start of the session; reuse it "
         "instead of re-reading, and track your own writes on top of it.\n\n"
         f"## Tasks ({state})\n{tasks}\n\n"
         f"## Projects\n{projects}\n\n"
+        f"## Tags\n{tags}\n\n"
         f"## Glossary\n{glossary}\n"
     )
 

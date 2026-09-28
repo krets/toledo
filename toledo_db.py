@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Toledo SQLite store — the single source of truth for tasks, projects, notes,
-activity, glossary and context. The web server and MCP server both go through
+Toledo SQLite store — the single source of truth for tasks, projects, tags,
+notes, activity, glossary and context. The web server and MCP server both go through
 this module; nothing else touches the database directly.
 
 DB:      $TOLEDO_DB, or ~/.toledo/toledo.db
@@ -36,7 +36,8 @@ DEFAULT_PRIORITY = 50
 # way round (lower = more important); _upgrade flips old databases.
 # Schema 3 repoints tasks whose project was stored as an unregistered string.
 # Schema 4 turns activity into a global event log (see the table below).
-SCHEMA_VERSION = 4
+# Schema 5 adds task tags.
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -77,6 +78,15 @@ CREATE TABLE IF NOT EXISTS task_aliases (
     slug    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS task_aliases_slug ON task_aliases(slug);
+
+-- Free-form tags on top-level tasks: a tag exists while some task has it.
+-- Subtasks carry none of their own and show their parent's.
+CREATE TABLE IF NOT EXISTS task_tags (
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    tag     TEXT NOT NULL,
+    PRIMARY KEY (task_id, tag)
+);
+CREATE INDEX IF NOT EXISTS task_tags_tag ON task_tags(tag);
 
 CREATE TABLE IF NOT EXISTS notes (
     id      INTEGER PRIMARY KEY,
@@ -376,7 +386,7 @@ def _unique_slug(conn, name: str, parent_id: int | None, exclude_id: int | None 
 
 # ── Event log ─────────────────────────────────────────────────────────────────
 
-SCOPES = ["task", "project", "glossary", "journal", "context", "system"]
+SCOPES = ["task", "project", "tag", "glossary", "journal", "context", "system"]
 
 # Who made a change, when the caller doesn't say: each server sets its own
 # ('web', 'mcp') at startup; the web chat passes 'chat' explicitly.
@@ -461,9 +471,25 @@ def _subtasks(conn, parent_ids: list[int]) -> dict[int, list[dict]]:
     return out
 
 
+def _tags(conn, task_ids) -> dict[int, list[str]]:
+    ids = sorted(set(task_ids))
+    out: dict[int, list[str]] = {tid: [] for tid in ids}
+    if ids:
+        for r in conn.execute(
+            f"SELECT task_id, tag FROM task_tags WHERE task_id IN ({','.join('?' * len(ids))}) "
+            "ORDER BY tag", ids,
+        ):
+            out[r["task_id"]].append(r["tag"])
+    return out
+
+
 def _dicts(conn, rows) -> list[dict]:
-    """Task dicts with their subtasks, and a subtask's parent (slug, name)."""
+    """Task dicts with their tags and subtasks, and a subtask's parent
+    (slug, name). A subtask's tags are its parent's."""
     tasks = [_base_dict(r) for r in rows]
+    tags = _tags(conn, [t["parent_id"] or t["id"] for t in tasks])
+    for t in tasks:
+        t["tags"] = tags[t["parent_id"] or t["id"]]
     subs = _subtasks(conn, [t["id"] for t in tasks])
     parent_ids = sorted({t["parent_id"] for t in tasks if t["parent_id"]})
     parents = {
@@ -672,15 +698,23 @@ def _resolve_subtask(conn, parent_id: int, ref: str, states=SUBTASK_STATES, firs
 
 # ── Queries ───────────────────────────────────────────────────────────────────
 
-def list_tasks(states=None, project: str | None = None) -> list[dict]:
+def list_tasks(states=None, project: str | None = None, tags=None,
+               match_all: bool = False) -> list[dict]:
+    """Top-level tasks in states, optionally only those in project and
+    those with any of tags (every one of them, with match_all)."""
     states = list(states or STATES)
     marks = ",".join("?" * len(states))
     sql = f"SELECT * FROM tasks WHERE parent_id IS NULL AND state IN ({marks})"
     params: list = list(states)
+    tags = parse_tags(tags)
     with connect() as c:
         if project:
             sql += " AND project = ?"
             params.append(_project_code(c, project))
+        if tags:
+            sql += (f" AND id IN (SELECT task_id FROM task_tags WHERE tag IN ({','.join('?' * len(tags))})"
+                    " GROUP BY task_id HAVING COUNT(*) >= ?)")
+            params += [*tags, len(tags) if match_all else 1]
         sql += f" ORDER BY {_STATE_ORDER}, priority DESC, id"
         return _dicts(c, c.execute(sql, params).fetchall())
 
@@ -697,8 +731,8 @@ def upcoming(days: int = 7) -> list[dict]:
 
 
 def search(query: str) -> list[dict]:
-    """Tasks whose name/slug, description, or notes contain query.
-    Each result carries 'hits': which of name/description/notes matched."""
+    """Tasks whose name/slug, tags, description, or notes contain query.
+    Each result carries 'hits': which of name/tags/description/notes matched."""
     q = (query or "").strip().lower()
     if not q:
         return []
@@ -713,11 +747,19 @@ def search(query: str) -> list[dict]:
                 "SELECT DISTINCT task_id FROM notes WHERE lower(text) LIKE ?", (like,)
             )
         }
+        qt = "-".join(q.lstrip("#").split())
+        tagged = {
+            r["task_id"] for r in c.execute(
+                "SELECT DISTINCT task_id FROM task_tags WHERE instr(tag, ?) > 0", (qt,)
+            )
+        } if qt else set()
         hits_by_id = {}
         for r in rows:
             hits = []
             if q in r["slug"] or q in r["name"].lower() or (qn and qn in _norm(r["name"])):
                 hits.append("name")
+            if r["id"] in tagged:
+                hits.append("tags")
             if q in (r["description"] or "").lower():
                 hits.append("description")
             if r["id"] in noted:
@@ -818,7 +860,7 @@ def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = 
 
 def create_task(name: str, project: str | None = None, priority: int | str | None = None,
                 due: str | None = None, recurrence: int | None = None,
-                description: str | None = None, source: str | None = None) -> dict:
+                description: str | None = None, tags=None, source: str | None = None) -> dict:
     name = (name or "").strip()
     if not name:
         raise ToledoError("name is required")
@@ -826,6 +868,7 @@ def create_task(name: str, project: str | None = None, priority: int | str | Non
     if due:
         validate_date(due)
     recurrence = int(recurrence) if recurrence else None
+    tags = parse_tags(tags)
     ts = now_iso()
     with connect() as c:
         project = _project_code(c, project) if (project or "").strip() else _default_project(c)
@@ -837,7 +880,9 @@ def create_task(name: str, project: str | None = None, priority: int | str | Non
              description or "", ts, ts),
         )
         tid = cur.lastrowid
-        _log_task(c, tid, "created", ts, state="active", priority=priority, project=project, source=source)
+        c.executemany("INSERT INTO task_tags (task_id, tag) VALUES (?, ?)", [(tid, t) for t in tags])
+        _log_task(c, tid, "created", ts, state="active", priority=priority, project=project,
+                  tags=tags or None, source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()])[0]
 
 
@@ -919,7 +964,8 @@ def delete_task(ref: str, source: str | None = None) -> dict:
         # Logged first: the delete then clears task_id on this and every
         # earlier event, leaving the snapshot to say which task it was.
         _log_task(c, row["id"], "deleted", project=row["project"], state=row["state"],
-                  priority=row["priority"], subtasks=subtasks or None, source=source)
+                  priority=row["priority"], tags=d["tags"] or None, subtasks=subtasks or None,
+                  source=source)
         _clear_context_if(c, row["id"])
         _snapshot_history(c, row["id"])
         c.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
@@ -973,6 +1019,40 @@ def set_project(ref: str, project: str, source: str | None = None) -> dict:
             _touch(c, sub["id"], project=project)
             _log_task(c, sub["id"], "reprojected", old_project=sub["project"], new_project=project,
                       source=source)
+        return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
+
+
+def tag_task(ref: str, tags, source: str | None = None) -> dict:
+    """Add tags to a task; ones it already has are ignored."""
+    tags = parse_tags(tags)
+    if not tags:
+        raise ToledoError("at least one tag is required")
+    with connect() as c:
+        row = _resolve(c, ref)
+        _reject_subtask(row, "subtasks share the parent's tags")
+        have = set(_tags(c, [row["id"]])[row["id"]])
+        added = [t for t in tags if t not in have]
+        if not added:
+            raise ToledoError(f"Task already has {_tag_list(tags)}")
+        c.executemany("INSERT INTO task_tags (task_id, tag) VALUES (?, ?)", [(row["id"], t) for t in added])
+        _log_task(c, row["id"], "tagged", tags=added, source=source)
+        return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
+
+
+def untag_task(ref: str, tags, source: str | None = None) -> dict:
+    """Remove tags from a task; ones it doesn't have are ignored."""
+    tags = parse_tags(tags)
+    if not tags:
+        raise ToledoError("at least one tag is required")
+    with connect() as c:
+        row = _resolve(c, ref)
+        _reject_subtask(row, "subtasks share the parent's tags")
+        have = set(_tags(c, [row["id"]])[row["id"]])
+        removed = [t for t in tags if t in have]
+        if not removed:
+            raise ToledoError(f"Task doesn't have {_tag_list(tags)}")
+        c.executemany("DELETE FROM task_tags WHERE task_id = ? AND tag = ?", [(row["id"], t) for t in removed])
+        _log_task(c, row["id"], "untagged", tags=removed, source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
 
@@ -1257,6 +1337,55 @@ def merge_projects(from_ref: str, into_ref: str, source: str | None = None) -> t
                    count=count, source=source)
         return (*names, count)
 
+
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+def normalize_tag(value) -> str:
+    """A tag as stored: lowercase, no leading '#', inner spaces as '-'."""
+    tag = "-".join(str(value or "").strip().lstrip("#").lower().split())
+    if not tag:
+        raise ToledoError("tag is empty")
+    if "," in tag:
+        raise ToledoError(f"Invalid tag '{value}' (tags cannot contain commas)")
+    return tag
+
+
+def parse_tags(value) -> list[str]:
+    """Tags given as a list or a comma-separated string, normalized and
+    without duplicates."""
+    return list(dict.fromkeys(normalize_tag(t) for t in _split(value)))
+
+
+def _tag_list(tags) -> str:
+    return ", ".join(f"#{t}" for t in tags)
+
+
+def list_tags() -> list[dict]:
+    """Every tag in use with how many tasks, and active tasks, have it."""
+    with connect() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT g.tag, COUNT(*) AS tasks, SUM(t.state = 'active') AS active "
+            "FROM task_tags g JOIN tasks t ON t.id = g.task_id GROUP BY g.tag ORDER BY g.tag"
+        )]
+
+
+def rename_tag(old, new, source: str | None = None) -> tuple[str, str, int]:
+    """Rename a tag on every task that has it, merging it into new if that
+    tag is already in use. Returns (old, new, number of tasks)."""
+    old, new = normalize_tag(old), normalize_tag(new)
+    if old == new:
+        raise ToledoError(f"Tag is already #{new}")
+    with connect() as c:
+        ids = [r[0] for r in c.execute("SELECT task_id FROM task_tags WHERE tag = ?", (old,))]
+        if not ids:
+            raise NotFound(f"No task has tag #{old}")
+        merged = c.execute("SELECT 1 FROM task_tags WHERE tag = ? LIMIT 1", (new,)).fetchone()
+        c.execute("UPDATE OR IGNORE task_tags SET tag = ? WHERE tag = ?", (new, old))
+        c.execute("DELETE FROM task_tags WHERE tag = ?", (old,))
+        _log_event(c, "tag", "tag_merged" if merged else "tag_renamed", old, new=new,
+                   tasks=len(ids), source=source)
+        return old, new, len(ids)
 
 # ── Glossary ──────────────────────────────────────────────────────────────────
 
