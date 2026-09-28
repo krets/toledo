@@ -61,13 +61,17 @@ def fmt_task_line(d: dict) -> str:
     )
 
 
+# Activity fields that hold a project code, shown by name instead.
+_PROJECT_KEYS = {"project", "old_project", "new_project"}
+
+
 def fmt_task_detail(d: dict) -> str:
     lines = [
         f"# {d['name']}",
         f"Slug:     {d['slug']}",
         f"State:    {d['state']}",
         f"Priority: {d['priority']} — {d['pri_label']}",
-        f"Project:  {d['project_name']} ({d['project']})",
+        f"Project:  {d['project_name']}",
     ]
     if d.get("updated"):
         lines.append(f"Updated:  {d['updated'][:16].replace('T', ' ')}")
@@ -95,7 +99,8 @@ def fmt_task_detail(d: dict) -> str:
         for e in reversed(d["activity"][-10:]):
             ts     = e.get("ts", "")[:16].replace("T", " ")
             action = e.get("action", "")
-            rest   = {k: v for k, v in e.items() if k not in ("ts", "action")}
+            rest   = {k: db.project_name(v) if k in _PROJECT_KEYS else v
+                      for k, v in e.items() if k not in ("ts", "action")}
             extra  = "  " + "  ".join(f"{k}={v}" for k, v in rest.items()) if rest else ""
             lines.append(f"  {ts}  {action}{extra}")
 
@@ -137,7 +142,8 @@ def glossary_warning(j: dict) -> str:
 
 def tag(d: dict) -> str:
     """Identify a task in write results so the caller can check the target."""
-    return f"'{d['name']}' [{d['slug']}, {d['project']}]"
+    project = d.get("project_name") or db.project_name(d["project"])
+    return f"'{d['name']}' [{d['slug']}, {project}]"
 
 
 def ok(text: str) -> list[types.TextContent]:
@@ -153,7 +159,7 @@ def err(text: str) -> list[types.TextContent]:
 # Sent to the client on connect. Keep it short: it lands in the model's context
 # every session, and the prompts themselves are fetched on demand.
 SERVER_INSTRUCTIONS = """\
-Toledo is the user's task manager. Tasks are addressed by partial name or slug.
+Toledo is the user's task manager. Tasks are addressed by partial name or slug, and projects by name.
 Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low).
 
 For more than one write, send them together in a single apply_changes call. Every \
@@ -202,7 +208,7 @@ async def list_tools() -> list[types.Tool]:
             name="list_tasks",
             description=(
                 "List tasks. By default returns active tasks. "
-                "Filter by state (active/completed/archive/all) and/or project code. "
+                "Filter by state (active/completed/archive/all) and/or project. "
                 "Each task shows its last-updated timestamp; sort or filter by recency "
                 "with 'sort' and 'updated_within_days'."
             ),
@@ -212,7 +218,7 @@ async def list_tools() -> list[types.Tool]:
                     "state":   {"type": "string", "enum": ["active","completed","archive","all"],
                                 "description": "Filter by task state (default: active)"},
                     "project": {"type": "string",
-                                "description": "Filter by project code (e.g. JOB, HLT)"},
+                                "description": "Filter by project name (e.g. Chores)"},
                     "sort":    {"type": "string", "enum": ["default", "recent"],
                                 "description": "'recent' sorts by last-updated, newest first (default: creation order)"},
                     "updated_within_days": {"type": "integer",
@@ -241,7 +247,7 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "name":        {"type": "string", "description": "Task name"},
-                    "project":     {"type": "string", "description": "Project code (e.g. JOB). Defaults to GEN"},
+                    "project":     {"type": "string", "description": "Project name (e.g. Chores). Defaults to General"},
                     "priority":    {"type": "integer", "description": "Priority 1–99 (higher = more important). Default 50"},
                     "due":         {"type": "string", "description": "Due date YYYY-MM-DD"},
                     "recurrence":  {"type": "integer", "description": "Repeat every N days"},
@@ -330,7 +336,7 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "task":    {"type": "string"},
-                    "project": {"type": "string", "description": "Target project code"},
+                    "project": {"type": "string", "description": "Target project name"},
                 },
                 "required": ["task", "project"],
             },
@@ -459,7 +465,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="list_projects",
-            description="List all projects with their codes, names, and colors.",
+            description="List all projects with their names, colors, and active task counts.",
             inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
@@ -468,55 +474,48 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "code":  {"type": "string", "description": "Short code (e.g. WEB), max 8 chars"},
-                    "name":  {"type": "string", "description": "Display name"},
+                    "name":  {"type": "string", "description": "Project name"},
                     "color": {"type": "string", "description": "Hex color e.g. #3498db"},
                 },
-                "required": ["code", "name"],
+                "required": ["name"],
             },
         ),
         types.Tool(
             name="remove_project",
-            description="Remove a project by code.",
+            description="Remove an empty project. Use merge_projects for one that still has tasks.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "code": {"type": "string"},
+                    "project": {"type": "string", "description": "Project name"},
                 },
-                "required": ["code"],
+                "required": ["project"],
             },
         ),
         types.Tool(
             name="rename_project",
-            description=(
-                "Rename a project's code (e.g. PRJ -> WORK), carrying every task and "
-                "subtask in it along in one operation. Fails without "
-                "changing anything if the new code already exists as a distinct project "
-                "— use merge_projects for that case instead."
-            ),
+            description="Rename a project. Its tasks stay in it.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "old_code": {"type": "string", "description": "Existing project code"},
-                    "new_code": {"type": "string", "description": "New project code"},
+                    "project": {"type": "string", "description": "Current project name"},
+                    "name":    {"type": "string", "description": "New project name"},
                 },
-                "required": ["old_code", "new_code"],
+                "required": ["project", "name"],
             },
         ),
         types.Tool(
             name="merge_projects",
             description=(
                 "Merge one project into another: moves every task and subtask from "
-                "from_code to into_code, then removes from_code from the project "
-                "registry. into_code must already exist."
+                "from_project to into_project, then removes from_project."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "from_code": {"type": "string", "description": "Project code to merge away"},
-                    "into_code": {"type": "string", "description": "Project code to merge into (must already exist)"},
+                    "from_project": {"type": "string", "description": "Project to merge away"},
+                    "into_project": {"type": "string", "description": "Project to merge into"},
                 },
-                "required": ["from_code", "into_code"],
+                "required": ["from_project", "into_project"],
             },
         ),
         types.Tool(
@@ -699,6 +698,11 @@ _ARG_ALIASES = {
     "add_journal": {"text": "raw", "content": "raw", "dump": "raw", "revised": "summary"},
     "get_journal": {"id": "entry", "entry_id": "entry", "date": "entry"},
     "update_journal": {"id": "entry", "entry_id": "entry", "revised": "summary"},
+    "remove_project": {"code": "project", "name": "project"},
+    "rename_project": {"old_code": "project", "old_name": "project",
+                       "new_code": "name", "new_name": "name"},
+    "merge_projects": {"from_code": "from_project", "from": "from_project",
+                       "into_code": "into_project", "into": "into_project"},
 }
 
 _required_args: dict[str, list[str]] | None = None
@@ -837,7 +841,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     # ── list_tasks ────────────────────────────────────────────────────────────
     if name == "list_tasks":
         state_filter   = args.get("state", "active")
-        project_filter = (args.get("project") or "").upper() or None
+        project_filter = args.get("project") or None
         sort           = args.get("sort", "default")
         updated_within = args.get("updated_within_days")
         if state_filter != "all" and state_filter not in db.STATES:
@@ -905,7 +909,7 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     # ── reproject_task ────────────────────────────────────────────────────────
     if name == "reproject_task":
         d = db.set_project(args["task"], args["project"])
-        return ok(f"Project → {d['project']} ({db.project_name(d['project'])}): {tag(d)}")
+        return ok(f"Project → {tag(d)}")
 
     # ── set_due ───────────────────────────────────────────────────────────────
     if name == "set_due":
@@ -982,8 +986,8 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             by_proj: dict[str, list] = {}
             for d in tasks:
                 by_proj.setdefault(d["project"], []).append(d)
-            for proj_code, proj_tasks in sorted(by_proj.items()):
-                lines.append(f"  {proj_tasks[0]['project_name']} ({proj_code}) — {len(proj_tasks)} task(s)")
+            for proj_tasks in sorted(by_proj.values(), key=lambda t: t[0]["project_name"].lower()):
+                lines.append(f"  {proj_tasks[0]['project_name']} — {len(proj_tasks)} task(s)")
                 for d in proj_tasks:
                     due = f"  due:{('⚠' if d['overdue'] else '')}{d['due']}" if d["due"] else ""
                     lines.append(f"    • {d['name']}{due}")
@@ -995,39 +999,36 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         projects = db.list_projects()
         if not projects:
             return ok("No projects defined.")
-        lines = [f"{'CODE':<8}  {'NAME':<20}  COLOR"]
-        lines.append("-" * 40)
-        for code, val in sorted(projects.items()):
-            lines.append(f"{code:<8}  {val['name']:<20}  {val['color']}")
+        active: dict[str, int] = {}
+        for d in db.list_tasks(["active"]):
+            active[d["project"]] = active.get(d["project"], 0) + 1
+        lines = [f"{'NAME':<20}  {'ACTIVE':>6}  COLOR", "-" * 40]
+        for code, val in sorted(projects.items(), key=lambda p: p[1]["name"].lower()):
+            lines.append(f"{val['name']:<20}  {active.get(code, 0):>6}  {val['color']}")
         return ok("\n".join(lines))
 
     # ── add_project ───────────────────────────────────────────────────────────
     if name == "add_project":
-        code  = args["code"].upper().strip()
         pname = args["name"].strip()
         color = args.get("color") or ""
-        db.save_project(code, pname, color)
-        return ok(f"✓ Project '{code}' = '{pname}'" + (f"  {color}" if color else ""))
+        db.save_project(None, pname, color)
+        return ok(f"✓ Project '{pname}'" + (f"  {color}" if color else ""))
 
     # ── remove_project ────────────────────────────────────────────────────────
     if name == "remove_project":
-        code = args["code"].upper().strip()
-        db.remove_project(code)
-        return ok(f"Removed project '{code}'")
+        return ok(f"Removed project '{db.remove_project(args['project'])}'")
 
     # ── rename_project ────────────────────────────────────────────────────────
     if name == "rename_project":
-        old_code = args["old_code"].upper().strip()
-        new_code = args["new_code"].upper().strip()
-        count = db.rename_project(old_code, new_code)
-        return ok(f"Renamed project '{old_code}' → '{new_code}' ({count} task(s) updated)")
+        code = db.find_project(args["project"])
+        old = db.project_name(code)
+        db.update_project(code, name=args["name"])
+        return ok(f"Renamed project '{old}' → '{args['name'].strip()}'")
 
     # ── merge_projects ────────────────────────────────────────────────────────
     if name == "merge_projects":
-        from_code = args["from_code"].upper().strip()
-        into_code = args["into_code"].upper().strip()
-        count = db.merge_projects(from_code, into_code)
-        return ok(f"Merged '{from_code}' into '{into_code}' ({count} task(s) moved), removed '{from_code}'")
+        src, dst, count = db.merge_projects(args["from_project"], args["into_project"])
+        return ok(f"Merged '{src}' into '{dst}' ({count} task(s) moved), removed '{src}'")
 
     # ── update_glossary ───────────────────────────────────────────────────────
     if name == "update_glossary":
@@ -1104,7 +1105,7 @@ async def list_resources() -> list[types.Resource]:
         types.Resource(
             uri="toledo://projects",
             name="Toledo Projects",
-            description="Project registry with codes and names",
+            description="Projects with their names, colors, and active task counts",
             mimeType="text/plain",
         ),
         types.Resource(
@@ -1270,8 +1271,8 @@ to archive) or permanently deleting (delete_task) anything.
 2. Review the category structure itself (the snapshot's project list): rename, split, merge, or \
 otherwise refine categories to make daily use easier. The current categories are not \
 guaranteed to be optimal long-term — don't assume they are. Use rename_project to rename a \
-code in place (carries every task/subtask in it along), merge_projects to fold one category \
-into another, and add_project/remove_project for brand-new or now-empty categories.
+category (its tasks stay in it), merge_projects to fold one category into another, and \
+add_project/remove_project for brand-new or now-empty categories.
 
 3. Reassign individually miscategorized tasks to better-fitting categories via reproject_task.
 

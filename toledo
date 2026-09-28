@@ -330,13 +330,13 @@ def cmd_ctx(args):
 
 def cmd_proj(args):
     if args.remove:
-        out("remove_project", code=args.remove)
+        out("remove_project", project=args.remove)
     elif args.rename:
-        out("rename_project", old_code=args.rename[0], new_code=args.rename[1])
+        out("rename_project", project=args.rename[0], name=args.rename[1])
     elif args.merge:
-        out("merge_projects", from_code=args.merge[0], into_code=args.merge[1])
-    elif args.code and args.name:
-        out("add_project", code=args.code, name=args.name, color=args.color)
+        out("merge_projects", from_project=args.merge[0], into_project=args.merge[1])
+    elif args.name:
+        out("add_project", name=args.name, color=args.color)
     else:
         out("list_projects")
 
@@ -525,7 +525,7 @@ def main():
     ps = s.add_parser("status", aliases=["ls"], help="List tasks")
     ps.add_argument("-a", "--all", action="store_true", help="All states")
     ps.add_argument("-s", "--state", choices=STATES)
-    ps.add_argument("-c", "--project", metavar="CODE")
+    ps.add_argument("-c", "--project", metavar="NAME")
     ps.add_argument("-r", "--recent", action="store_true", help="Newest updates first")
     ps.add_argument("--days", type=int, help="Only tasks updated within N days")
 
@@ -611,10 +611,9 @@ def main():
     px.add_argument("task", nargs="?", default="show")
 
     pp = s.add_parser("proj", help="List/add/remove/rename/merge projects")
-    pp.add_argument("code", nargs="?")
-    pp.add_argument("name", nargs="?")
+    pp.add_argument("name", nargs="?", help="Add a project with this name")
     pp.add_argument("--color", metavar="HEX")
-    pp.add_argument("-r", "--remove", metavar="CODE")
+    pp.add_argument("-r", "--remove", metavar="NAME")
     pp.add_argument("--rename", nargs=2, metavar=("OLD", "NEW"))
     pp.add_argument("--merge", nargs=2, metavar=("FROM", "INTO"))
 

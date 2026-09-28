@@ -34,7 +34,8 @@ DEFAULT_PRIORITY = 50
 
 # Priority is 1–99, higher = more important. Schema 1 stored it the other
 # way round (lower = more important); _upgrade flips old databases.
-SCHEMA_VERSION = 2
+# Schema 3 repoints tasks whose project was stored as an unregistered string.
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -49,8 +50,8 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 -- Top-level tasks have parent_id NULL; subtasks point at their parent.
--- project is deliberately not a foreign key: tasks may reference a code
--- that has no registry entry (as they could with the file backend).
+-- project holds a projects.code. It is not a foreign key so project codes
+-- can be rewritten in bulk, but every write resolves it against the registry.
 CREATE TABLE IF NOT EXISTS tasks (
     id          INTEGER PRIMARY KEY,
     parent_id   INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
@@ -201,6 +202,22 @@ def _upgrade(conn) -> None:
                 f"UPDATE activity SET data = json_set(data, '$.{key}', 100 - json_extract(data, '$.{key}')) "
                 f"WHERE json_type(data, '$.{key}') = 'integer'"
             )
+    if version < 3:
+        # Writes used to store the project argument verbatim, so a project
+        # given by name ('Travel') landed as an unregistered 'TRAVEL'. Point
+        # those at the project they named, and register anything left over.
+        orphans = [r[0] for r in conn.execute(
+            "SELECT DISTINCT project FROM tasks WHERE project NOT IN (SELECT code FROM projects)"
+        )]
+        for orphan in orphans:
+            row = conn.execute(
+                "SELECT code FROM projects WHERE name = ? COLLATE NOCASE", (orphan,)
+            ).fetchone()
+            if row:
+                _move_project_tasks(conn, orphan, row[0])
+            else:
+                conn.execute("INSERT INTO projects (code, name) VALUES (?, ?)",
+                             (orphan, orphan.title()))
     conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
 
 
@@ -477,11 +494,11 @@ def list_tasks(states=None, project: str | None = None) -> list[dict]:
     marks = ",".join("?" * len(states))
     sql = f"SELECT * FROM tasks WHERE parent_id IS NULL AND state IN ({marks})"
     params: list = list(states)
-    if project:
-        sql += " AND project = ?"
-        params.append(project.upper())
-    sql += f" ORDER BY {_STATE_ORDER}, priority DESC, id"
     with connect() as c:
+        if project:
+            sql += " AND project = ?"
+            params.append(_project_code(c, project))
+        sql += f" ORDER BY {_STATE_ORDER}, priority DESC, id"
         return _dicts(c, c.execute(sql, params).fetchall())
 
 
@@ -538,13 +555,13 @@ def create_task(name: str, project: str | None = None, priority: int | None = No
     name = (name or "").strip()
     if not name:
         raise ToledoError("name is required")
-    project = (project or DEFAULT_PROJECT).upper().strip()
     priority = int(priority or DEFAULT_PRIORITY)
     if due:
         validate_date(due)
     recurrence = int(recurrence) if recurrence else None
     ts = now_iso()
     with connect() as c:
+        project = _project_code(c, project) if (project or "").strip() else _default_project(c)
         slug = _unique_slug(c, name, None)
         cur = c.execute(
             "INSERT INTO tasks (slug, name, state, priority, project, due, recurrence, "
@@ -650,13 +667,11 @@ def set_priority(ref: str, priority: int, source: str | None = None) -> dict:
 
 
 def set_project(ref: str, project: str, source: str | None = None) -> dict:
-    project = (project or "").upper().strip()
-    if not project:
-        raise ToledoError("project is required")
     with connect() as c:
+        project = _project_code(c, project)
         row = _resolve(c, ref)
         if row["project"] == project:
-            raise ToledoError(f"Task is already in project {project}")
+            raise ToledoError(f"Task is already in project {_project_name(c, project)}")
         _touch(c, row["id"], project=project)
         c.execute("UPDATE tasks SET project = ? WHERE parent_id = ?", (project, row["id"]))
         _log(c, row["id"], "reprojected", old_project=row["project"], new_project=project, source=source)
@@ -785,42 +800,105 @@ def list_projects() -> dict[str, dict]:
         }
 
 
+def _project_code(conn, ref: str | None) -> str:
+    """Resolve a project given by code or name, in any case, to its code."""
+    ref = (ref or "").strip()
+    if not ref:
+        raise ToledoError("project is required")
+    row = conn.execute(
+        "SELECT code FROM projects WHERE code = ? COLLATE NOCASE OR name = ? COLLATE NOCASE "
+        "ORDER BY code = ? COLLATE NOCASE DESC LIMIT 1",
+        (ref, ref, ref),
+    ).fetchone()
+    if row:
+        return row["code"]
+    names = ", ".join(r["name"] for r in conn.execute("SELECT name FROM projects ORDER BY name"))
+    raise NotFound(f"Unknown project '{ref}'. Projects: {names or '(none)'}")
+
+
+def _default_project(conn) -> str:
+    conn.execute("INSERT OR IGNORE INTO projects (code, name) VALUES (?, 'General')",
+                 (DEFAULT_PROJECT,))
+    return DEFAULT_PROJECT
+
+
+def _project_name(conn, code: str) -> str:
+    row = conn.execute("SELECT name FROM projects WHERE code = ?", (code,)).fetchone()
+    return row["name"] if row else code
+
+
+def find_project(ref: str) -> str:
+    """The code of the project given by code or name."""
+    with connect() as c:
+        return _project_code(c, ref)
+
+
 def project_name(code: str) -> str:
     with connect() as c:
-        row = c.execute("SELECT name FROM projects WHERE code = ?", (code,)).fetchone()
-        return row["name"] if row else code
+        return _project_name(c, code)
 
 
-def save_project(code: str, name: str, color: str | None = None) -> None:
-    """Add a project, or update the name (and color, if given) of an existing one."""
+def _check_name_free(conn, name: str, code: str | None = None) -> None:
+    row = conn.execute(
+        "SELECT code FROM projects WHERE name = ? COLLATE NOCASE AND code IS NOT ?", (name, code)
+    ).fetchone()
+    if row:
+        raise Conflict(f"A project named '{name}' already exists")
+
+
+def _new_code(conn, name: str) -> str:
+    base = re.sub(r"[^A-Z0-9]", "", name.upper())[:3] or "PRJ"
+    code, n = base, 2
+    while conn.execute("SELECT 1 FROM projects WHERE code = ?", (code,)).fetchone():
+        code, n = f"{base}{n}", n + 1
+    return code
+
+
+def save_project(code: str | None, name: str, color: str | None = None) -> str:
+    """Add a project, or update the name (and color, if given) of an existing
+    one. A new project without a code gets one derived from its name.
+    Returns the project's code."""
     code, name = (code or "").upper().strip(), (name or "").strip()
-    if not code or not name:
-        raise ToledoError("code and name are required")
+    if not name:
+        raise ToledoError("name is required")
     with connect() as c:
+        code = code or _new_code(c, name)
+        _check_name_free(c, name, code)
         c.execute(
             "INSERT INTO projects (code, name, color) VALUES (?, ?, ?) "
             "ON CONFLICT(code) DO UPDATE SET name = excluded.name, "
             "color = CASE WHEN ? IS NULL THEN projects.color ELSE excluded.color END",
             (code, name, color or "", color),
         )
+        return code
 
 
-def update_project(code: str, name: str | None = None, color: str | None = None) -> None:
-    code = code.upper()
+def update_project(ref: str, name: str | None = None, color: str | None = None) -> str:
+    """Rename or recolor a project given by code or name. Returns its code."""
     with connect() as c:
-        if not c.execute("SELECT 1 FROM projects WHERE code = ?", (code,)).fetchone():
-            raise NotFound(f"Project '{code}' not found")
+        code = _project_code(c, ref)
         if name is not None:
+            name = name.strip()
+            if not name:
+                raise ToledoError("name is required")
+            _check_name_free(c, name, code)
             c.execute("UPDATE projects SET name = ? WHERE code = ?", (name, code))
         if color is not None:
             c.execute("UPDATE projects SET color = ? WHERE code = ?", (color, code))
+        return code
 
 
-def remove_project(code: str) -> None:
-    code = code.upper().strip()
+def remove_project(ref: str) -> str:
+    """Remove an empty project. Returns its name."""
     with connect() as c:
-        if not c.execute("DELETE FROM projects WHERE code = ?", (code,)).rowcount:
-            raise NotFound(f"Project '{code}' not found")
+        code = _project_code(c, ref)
+        name = _project_name(c, code)
+        count = c.execute("SELECT COUNT(*) FROM tasks WHERE project = ?", (code,)).fetchone()[0]
+        if count:
+            raise Conflict(f"Project '{name}' still has {count} task(s) — "
+                           f"merge it into another project instead")
+        c.execute("DELETE FROM projects WHERE code = ?", (code,))
+        return name
 
 
 def _move_project_tasks(conn, old: str, new: str) -> int:
@@ -833,37 +911,17 @@ def _move_project_tasks(conn, old: str, new: str) -> int:
     return len(top)
 
 
-def rename_project(old: str, new: str) -> int:
-    """Change a project's code, carrying its tasks along. Returns tasks moved."""
-    old, new = old.upper().strip(), new.upper().strip()
-    if not old or not new:
-        raise ToledoError("old_code and new_code are required")
-    if old == new:
-        raise ToledoError("old_code and new_code are the same")
+def merge_projects(from_ref: str, into_ref: str) -> tuple[str, str, int]:
+    """Move every task in one project into another and drop the first.
+    Returns (from name, into name, tasks moved)."""
     with connect() as c:
-        if not c.execute("SELECT 1 FROM projects WHERE code = ?", (old,)).fetchone():
-            raise NotFound(f"Project '{old}' not found")
-        if c.execute("SELECT 1 FROM projects WHERE code = ?", (new,)).fetchone():
-            raise Conflict(f"Project '{new}' already exists — use merge_projects instead")
-        c.execute("UPDATE projects SET code = ? WHERE code = ?", (new, old))
-        return _move_project_tasks(c, old, new)
-
-
-def merge_projects(from_code: str, into_code: str) -> int:
-    """Move every task in from_code into into_code and drop from_code."""
-    src, dst = from_code.upper().strip(), into_code.upper().strip()
-    if not src or not dst:
-        raise ToledoError("from_code and into_code are required")
-    if src == dst:
-        raise ToledoError("from_code and into_code are the same")
-    with connect() as c:
-        if not c.execute("SELECT 1 FROM projects WHERE code = ?", (src,)).fetchone():
-            raise NotFound(f"Project '{src}' not found")
-        if not c.execute("SELECT 1 FROM projects WHERE code = ?", (dst,)).fetchone():
-            raise NotFound(f"Project '{dst}' not found — create it first with add_project")
+        src, dst = _project_code(c, from_ref), _project_code(c, into_ref)
+        if src == dst:
+            raise ToledoError("Cannot merge a project into itself")
+        names = _project_name(c, src), _project_name(c, dst)
         count = _move_project_tasks(c, src, dst)
         c.execute("DELETE FROM projects WHERE code = ?", (src,))
-        return count
+        return (*names, count)
 
 
 # ── Glossary ──────────────────────────────────────────────────────────────────
