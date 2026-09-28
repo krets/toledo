@@ -13,6 +13,7 @@ from flask import Flask, jsonify, make_response, request, send_from_directory
 import toledo_db as db
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+db.set_default_source("web")
 STARTED = datetime.now().isoformat(timespec="seconds")
 
 
@@ -362,6 +363,21 @@ def update_journal(entry_id):
 def delete_journal(entry_id):
     db.delete_journal(entry_id)
     return jsonify({"deleted": True})
+
+
+# ── Activity ──────────────────────────────────────────────────────────────────
+
+@app.route("/api/activity", methods=["GET"])
+def list_activity():
+    """The event log, newest first. ?scope=, ?action= take comma-separated
+    values; ?task= includes subtasks; ?project=; ?since=/&until= take a date
+    or timestamp; ?limit=/&offset= page through."""
+    a = request.args
+    return jsonify(db.list_activity(
+        limit=int(a.get("limit", 100)), offset=int(a.get("offset", 0)),
+        since=a.get("since"), until=a.get("until"), scope=a.get("scope"),
+        task=a.get("task"), action=a.get("action"), project=a.get("project"),
+    ))
 
 
 # ── Context ───────────────────────────────────────────────────────────────────

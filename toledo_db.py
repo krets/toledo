@@ -35,7 +35,8 @@ DEFAULT_PRIORITY = 50
 # Priority is 1–99, higher = more important. Schema 1 stored it the other
 # way round (lower = more important); _upgrade flips old databases.
 # Schema 3 repoints tasks whose project was stored as an unregistered string.
-SCHEMA_VERSION = 3
+# Schema 4 turns activity into a global event log (see the table below).
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -86,14 +87,19 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 CREATE INDEX IF NOT EXISTS notes_task ON notes(task_id);
 
+-- The event log. scope says what an event is about; task events carry task_id,
+-- the rest name their target in ref (project code, glossary term, journal id).
+-- History outlives its task: deleting one only clears task_id, and task events
+-- keep a slug/name snapshot in data. Its indexes are made in _upgrade.
 CREATE TABLE IF NOT EXISTS activity (
     id      INTEGER PRIMARY KEY,
-    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     ts      TEXT NOT NULL,
+    scope   TEXT NOT NULL DEFAULT 'task',
     action  TEXT NOT NULL,
+    ref     TEXT,
     data    TEXT NOT NULL DEFAULT '{}'
 );
-CREATE INDEX IF NOT EXISTS activity_task ON activity(task_id);
 
 CREATE TABLE IF NOT EXISTS description_history (
     id      INTEGER PRIMARY KEY,
@@ -176,6 +182,9 @@ def _open(path: Path) -> sqlite3.Connection:
 def _init(conn: sqlite3.Connection, path: Path) -> None:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if row and int(row[0]) < 4:
+        _backup(conn, path, int(row[0]))
     # The web and MCP servers share one database; the write lock makes sure
     # only the first of them to start runs the legacy migration.
     conn.execute("BEGIN IMMEDIATE")
@@ -191,8 +200,44 @@ def _init(conn: sqlite3.Connection, path: Path) -> None:
     conn.commit()
 
 
+def _backup(conn, path: Path, version: int) -> None:
+    """Copy the database aside before an upgrade that rebuilds a table."""
+    target = path.with_name(f"{path.name}.schema{version}-{datetime.now():%Y%m%d-%H%M%S}.bak")
+    try:
+        conn.execute("VACUUM INTO ?", (str(target),))
+        print(f"ℹ Backed up {path} to {target} before upgrading to schema {SCHEMA_VERSION}")
+    except sqlite3.OperationalError as e:
+        # The other server may have started the same upgrade this second.
+        print(f"⚠ Backup to {target} skipped: {e}")
+
+
 def _upgrade(conn) -> None:
     version = int(conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0])
+    if version < 4:
+        # Runs first, since later steps log events. SQLite cannot relax
+        # NOT NULL or change an FK action in place, so rebuild activity with
+        # the schema-4 columns, keeping ids. Nothing references activity, so
+        # this is safe with foreign keys on. Fresh databases already have
+        # the new table.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(activity)")}
+        if "scope" not in cols:
+            conn.execute("""
+                CREATE TABLE activity_v4 (
+                    id      INTEGER PRIMARY KEY,
+                    task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+                    ts      TEXT NOT NULL,
+                    scope   TEXT NOT NULL DEFAULT 'task',
+                    action  TEXT NOT NULL,
+                    ref     TEXT,
+                    data    TEXT NOT NULL DEFAULT '{}'
+                )""")
+            conn.execute("INSERT INTO activity_v4 (id, task_id, ts, scope, action, data) "
+                         "SELECT id, task_id, ts, 'task', action, data FROM activity")
+            conn.execute("DROP TABLE activity")
+            conn.execute("ALTER TABLE activity_v4 RENAME TO activity")
+        conn.execute("CREATE INDEX IF NOT EXISTS activity_task ON activity(task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS activity_ts ON activity(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS activity_scope ON activity(scope, ts)")
     if version < 2:
         # Flip priority so higher = more important, including the values
         # recorded in the activity log.
@@ -218,6 +263,8 @@ def _upgrade(conn) -> None:
             else:
                 conn.execute("INSERT INTO projects (code, name) VALUES (?, ?)",
                              (orphan, orphan.title()))
+    if version < SCHEMA_VERSION:
+        _log_event(conn, "system", "schema_upgraded", from_version=version, to_version=SCHEMA_VERSION)
     conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
 
 
@@ -327,14 +374,52 @@ def _unique_slug(conn, name: str, parent_id: int | None, exclude_id: int | None 
         slug, n = f"{base}-{n}", n + 1
 
 
-def _log(conn, task_id: int, action: str, ts: str | None = None, **data) -> None:
+# ── Event log ─────────────────────────────────────────────────────────────────
+
+SCOPES = ["task", "project", "glossary", "journal", "context", "system"]
+
+# Who made a change, when the caller doesn't say: each server sets its own
+# ('web', 'mcp') at startup; the web chat passes 'chat' explicitly.
+_default_source: str | None = None
+
+
+def set_default_source(source: str | None) -> None:
+    global _default_source
+    _default_source = source
+
+
+def _insert_event(conn, scope: str, action: str, task_id: int | None = None,
+                  ref: str | None = None, ts: str | None = None, **data) -> str:
+    """Append one event. An event about a task snapshots its slug and name
+    (and its parent's slug, for a subtask) so it stays readable after the
+    task is deleted. Returns the timestamp used."""
     ts = ts or now_iso()
+    if data.get("source") is None:
+        data["source"] = _default_source
+    if task_id is not None:
+        t = conn.execute(
+            "SELECT t.slug, t.name, p.slug AS parent FROM tasks t "
+            "LEFT JOIN tasks p ON p.id = t.parent_id WHERE t.id = ?", (task_id,)
+        ).fetchone()
+        if t:
+            data = {"slug": t["slug"], "name": t["name"], "parent": t["parent"], **data}
     data = {k: v for k, v in data.items() if v is not None}
     conn.execute(
-        "INSERT INTO activity (task_id, ts, action, data) VALUES (?, ?, ?, ?)",
-        (task_id, ts, action, json.dumps(data)),
+        "INSERT INTO activity (task_id, ts, scope, action, ref, data) VALUES (?, ?, ?, ?, ?, ?)",
+        (task_id, ts, scope, action, None if ref is None else str(ref), json.dumps(data)),
     )
+    return ts
+
+
+def _log_task(conn, task_id: int, action: str, ts: str | None = None, **data) -> None:
+    """Log a change to a task and bump its updated_at."""
+    ts = _insert_event(conn, "task", action, task_id=task_id, ts=ts, **data)
     conn.execute("UPDATE tasks SET updated_at = ? WHERE id = ?", (ts, task_id))
+
+
+def _log_event(conn, scope: str, action: str, ref=None, task_id: int | None = None, **data) -> None:
+    """Log an event that is not a change to a task."""
+    _insert_event(conn, scope, action, task_id=task_id, ref=ref, **data)
 
 
 def _touch(conn, task_id: int, **fields) -> None:
@@ -384,6 +469,10 @@ def _dicts(conn, rows) -> list[dict]:
     return tasks
 
 
+# Keys _insert_event adds to describe the task an event belongs to.
+_SNAPSHOT_KEYS = {"slug", "name", "parent"}
+
+
 def _detail(conn, row) -> dict:
     d = _dicts(conn, [row])[0]
     d["description"] = row["description"]
@@ -394,7 +483,8 @@ def _detail(conn, row) -> dict:
         )
     ]
     d["activity"] = [
-        {"ts": r["ts"], "action": r["action"], **json.loads(r["data"] or "{}")}
+        {"ts": r["ts"], "action": r["action"],
+         **{k: v for k, v in json.loads(r["data"] or "{}").items() if k not in _SNAPSHOT_KEYS}}
         for r in conn.execute(
             "SELECT ts, action, data FROM activity WHERE task_id = ? ORDER BY ts, id", (row["id"],)
         )
@@ -591,6 +681,90 @@ def search(query: str) -> list[dict]:
         return results
 
 
+def _split(value) -> list[str]:
+    """A filter given as a list or a comma-separated string."""
+    if not value:
+        return []
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return [str(v).strip() for v in items if str(v).strip()]
+
+
+def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = None,
+                  until: str | None = None, scope=None, task: str | None = None,
+                  action=None, project: str | None = None) -> list[dict]:
+    """Events newest first. since/until take a date (until inclusive) or a
+    full timestamp; scope and action take one value or several (list or
+    comma-separated); task includes its subtasks; project matches tasks now
+    in it, deleted tasks that were, and the project's own events."""
+    sql = ("SELECT a.*, t.slug AS t_slug, t.name AS t_name, t.project AS t_project, "
+           "t.state AS t_state, p.slug AS p_slug, p.name AS p_name "
+           "FROM activity a LEFT JOIN tasks t ON t.id = a.task_id "
+           "LEFT JOIN tasks p ON p.id = t.parent_id WHERE 1 = 1")
+    params: list = []
+    if since:
+        sql += " AND a.ts >= ?"
+        params.append(since.strip())
+    if until:
+        until = until.strip()
+        if len(until) == 10:
+            until = (datetime.strptime(validate_date(until), "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            sql += " AND a.ts < ?"
+        else:
+            sql += " AND a.ts <= ?"
+        params.append(until)
+    scopes = _split(scope)
+    if scopes:
+        bad = [s for s in scopes if s not in SCOPES]
+        if bad:
+            raise ToledoError(f"Unknown scope '{bad[0]}' (expected one of: {', '.join(SCOPES)})")
+        sql += f" AND a.scope IN ({','.join('?' * len(scopes))})"
+        params += scopes
+    actions = _split(action)
+    if actions:
+        sql += f" AND a.action IN ({','.join('?' * len(actions))})"
+        params += actions
+    with connect() as c:
+        if task:
+            tid = _resolve(c, task)["id"]
+            sql += " AND (a.task_id = ? OR t.parent_id = ?)"
+            params += [tid, tid]
+        if project:
+            code = _project_code(c, project)
+            sql += (" AND (t.project = ? OR (a.task_id IS NULL AND json_extract(a.data, '$.project') = ?)"
+                    " OR (a.scope = 'project' AND (a.ref = ? OR json_extract(a.data, '$.into') = ?)))")
+            params += [code] * 4
+        sql += " ORDER BY a.ts DESC, a.id DESC LIMIT ? OFFSET ?"
+        params += [int(limit) if limit else -1, int(offset or 0)]
+        out = []
+        for r in c.execute(sql, params):
+            data = json.loads(r["data"] or "{}")
+            # Only events about a task carry a snapshot; a project event's
+            # 'name' is the project's.
+            about_task = r["scope"] in ("task", "context")
+            snap = {k: data.pop(k, None) if about_task else None for k in _SNAPSHOT_KEYS}
+            exists = r["t_slug"] is not None
+            out.append({
+                "id":      r["id"],
+                "ts":      r["ts"],
+                "scope":   r["scope"],
+                "action":  r["action"],
+                "ref":     r["ref"],
+                "task_id": r["task_id"],
+                # The task as it is now, or as it was when logged if it is gone.
+                "slug":    r["t_slug"] if exists else snap["slug"],
+                "name":    r["t_name"] if exists else snap["name"],
+                "parent":  r["p_slug"] if exists else snap["parent"],
+                "parent_name": r["p_name"],
+                "project": r["t_project"],
+                "state":   r["t_state"],
+                # Slug of the top-level task to open, while it exists.
+                "open":    (r["p_slug"] or r["t_slug"]) if exists else None,
+                "deleted": r["task_id"] is None and snap["slug"] is not None,
+                "data":    data,
+            })
+        return out
+
+
 # ── Task mutations ────────────────────────────────────────────────────────────
 
 def create_task(name: str, project: str | None = None, priority: int | str | None = None,
@@ -614,7 +788,7 @@ def create_task(name: str, project: str | None = None, priority: int | str | Non
              description or "", ts, ts),
         )
         tid = cur.lastrowid
-        _log(c, tid, "created", ts, state="active", priority=priority, project=project, source=source)
+        _log_task(c, tid, "created", ts, state="active", priority=priority, project=project, source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (tid,)).fetchone()])[0]
 
 
@@ -630,11 +804,11 @@ def complete_task(ref: str, note: str | None = None, source: str | None = None) 
             base = datetime.strptime(row["due"], "%Y-%m-%d") if row["due"] else datetime.now()
             next_due = (base + timedelta(days=row["recurrence"])).strftime("%Y-%m-%d")
             _touch(c, tid, due=next_due)
-            _log(c, tid, "completed_recurring", next_due=next_due, source=source)
+            _log_task(c, tid, "completed_recurring", next_due=next_due, source=source)
             result.update(recurring=True, next_due=next_due)
         else:
             _touch(c, tid, state="completed")
-            _log(c, tid, "state_changed", from_state=row["state"], to_state="completed", source=source)
+            _log_task(c, tid, "state_changed", from_state=row["state"], to_state="completed", source=source)
             _clear_context_if(c, tid)
         if note and note.strip():
             _add_note(c, tid, note.strip(), source)
@@ -649,7 +823,7 @@ def move_task(ref: str, state: str, source: str | None = None) -> dict:
         row = _resolve(c, ref)
         if row["state"] != state:
             _touch(c, row["id"], state=state)
-            _log(c, row["id"], "state_changed", from_state=row["state"], to_state=state, source=source)
+            _log_task(c, row["id"], "state_changed", from_state=row["state"], to_state=state, source=source)
             if state != "active":
                 _clear_context_if(c, row["id"])
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
@@ -662,16 +836,41 @@ def cancel_recurrence(ref: str, source: str | None = None) -> dict:
         if not row["recurrence"]:
             raise ToledoError(f"'{row['slug']}' is not a recurring task")
         _touch(c, row["id"], recurrence=None, state="completed")
-        _log(c, row["id"], "recurring_cancelled", source=source)
+        _log_task(c, row["id"], "recurring_cancelled", source=source)
         _clear_context_if(c, row["id"])
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
 
-def delete_task(ref: str) -> dict:
+def _snapshot_history(conn, task_id: int) -> None:
+    """Stamp slug/name onto a task's (and its subtasks') events that predate
+    snapshots, before a delete leaves them without a task_id."""
+    for t in conn.execute(
+        "SELECT t.id, t.slug, t.name, p.slug AS parent FROM tasks t "
+        "LEFT JOIN tasks p ON p.id = t.parent_id WHERE t.id = ? OR t.parent_id = ?", (task_id, task_id)
+    ).fetchall():
+        conn.execute(
+            "UPDATE activity SET data = json_set(data, '$.slug', ?, '$.name', ?) "
+            "WHERE task_id = ? AND json_extract(data, '$.slug') IS NULL",
+            (t["slug"], t["name"], t["id"]),
+        )
+        if t["parent"]:
+            conn.execute(
+                "UPDATE activity SET data = json_set(data, '$.parent', ?) "
+                "WHERE task_id = ? AND json_extract(data, '$.parent') IS NULL", (t["parent"], t["id"]),
+            )
+
+
+def delete_task(ref: str, source: str | None = None) -> dict:
     with connect() as c:
         row = _resolve(c, ref)
         d = _base_dict(row)
+        subtasks = c.execute("SELECT count(*) FROM tasks WHERE parent_id = ?", (row["id"],)).fetchone()[0]
+        # Logged first: the delete then clears task_id on this and every
+        # earlier event, leaving the snapshot to say which task it was.
+        _log_task(c, row["id"], "deleted", project=row["project"], state=row["state"],
+                  priority=row["priority"], subtasks=subtasks or None, source=source)
         _clear_context_if(c, row["id"])
+        _snapshot_history(c, row["id"])
         c.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
         return d
 
@@ -680,7 +879,7 @@ def _set_field(ref: str, field: str, value, action: str, source=None, **log) -> 
     with connect() as c:
         row = _resolve(c, ref)
         _touch(c, row["id"], **{field: value})
-        _log(c, row["id"], action, source=source, **log)
+        _log_task(c, row["id"], action, source=source, **log)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
 
@@ -694,7 +893,7 @@ def rename_task(ref: str, name: str, source: str | None = None) -> dict:
         if slug != row["slug"]:
             c.execute("INSERT INTO task_aliases (task_id, slug) VALUES (?, ?)", (row["id"], row["slug"]))
         _touch(c, row["id"], name=name, slug=slug)
-        _log(c, row["id"], "renamed", old=row["name"], new=name, source=source)
+        _log_task(c, row["id"], "renamed", old=row["name"], new=name, source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
 
@@ -705,7 +904,7 @@ def set_priority(ref: str, priority: int | str, source: str | None = None) -> di
         if row["priority"] == priority:
             raise ToledoError(f"Task already has priority {priority}")
         _touch(c, row["id"], priority=priority)
-        _log(c, row["id"], "reprioritized", old_priority=row["priority"],
+        _log_task(c, row["id"], "reprioritized", old_priority=row["priority"],
              new_priority=priority, source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
@@ -717,8 +916,11 @@ def set_project(ref: str, project: str, source: str | None = None) -> dict:
         if row["project"] == project:
             raise ToledoError(f"Task is already in project {_project_name(c, project)}")
         _touch(c, row["id"], project=project)
-        c.execute("UPDATE tasks SET project = ? WHERE parent_id = ?", (project, row["id"]))
-        _log(c, row["id"], "reprojected", old_project=row["project"], new_project=project, source=source)
+        _log_task(c, row["id"], "reprojected", old_project=row["project"], new_project=project, source=source)
+        for sub in c.execute("SELECT id, project FROM tasks WHERE parent_id = ?", (row["id"],)).fetchall():
+            _touch(c, sub["id"], project=project)
+            _log_task(c, sub["id"], "reprojected", old_project=sub["project"], new_project=project,
+                      source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
 
@@ -742,23 +944,24 @@ def set_recurrence(ref: str, interval: int | None, source: str | None = None) ->
 def set_description(ref: str, text: str, source: str | None = None) -> dict:
     with connect() as c:
         row = _resolve(c, ref)
+        history_id = None
         if row["description"]:
-            c.execute(
+            history_id = c.execute(
                 "INSERT INTO description_history (task_id, ts, text) VALUES (?, ?, ?)",
                 (row["id"], now_iso(), row["description"]),
-            )
+            ).lastrowid
         _touch(c, row["id"], description=text or "")
-        _log(c, row["id"], "description_updated", source=source)
+        _log_task(c, row["id"], "description_updated", history_id=history_id, source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
 
 def _add_note(conn, task_id: int, text: str, source: str | None) -> None:
     ts = now_iso()
-    conn.execute(
+    note_id = conn.execute(
         "INSERT INTO notes (task_id, ts, text, source) VALUES (?, ?, ?, ?)",
         (task_id, ts, text, source),
-    )
-    _log(conn, task_id, "note_added", ts, source=source)
+    ).lastrowid
+    _log_task(conn, task_id, "note_added", ts, note_id=note_id, source=source)
 
 
 def add_note(ref: str, text: str, source: str | None = None) -> dict:
@@ -791,7 +994,10 @@ def add_subtask(ref: str, name: str, priority: int | str | None = None, due: str
             (parent["id"], slug, name, priority, parent["project"],
              due or None, description or "", ts, ts),
         )
-        _log(c, parent["id"], "subtask_created", ts, subtask=slug, source=source)
+        _log_task(c, cur.lastrowid, "created", ts, state="active", priority=priority, due=due or None,
+                  source=source)
+        _log_task(c, parent["id"], "subtask_created", ts, subtask=slug, subtask_id=cur.lastrowid,
+                  source=source)
         return {"parent": _base_dict(parent),
                 **_base_dict(c.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone())}
 
@@ -805,9 +1011,10 @@ def set_subtask_state(ref: str, sub_ref: str, state: str, source: str | None = N
     with connect() as c:
         parent = _resolve(c, ref)
         sub = _resolve_subtask(c, parent["id"], sub_ref, [other], first=first_match)
-        _touch(c, sub["id"], state=state, updated_at=now_iso())
+        _touch(c, sub["id"], state=state)
+        _log_task(c, sub["id"], "state_changed", from_state=other, to_state=state, source=source)
         action = "subtask_completed" if state == "completed" else "subtask_reopened"
-        _log(c, parent["id"], action, subtask=sub["slug"], source=source)
+        _log_task(c, parent["id"], action, subtask=sub["slug"], subtask_id=sub["id"], source=source)
         return {"parent": _base_dict(parent), **_base_dict(sub), "state": state}
 
 
@@ -821,8 +1028,10 @@ def rename_subtask(ref: str, sub_ref: str, name: str, source: str | None = None)
         slug = _unique_slug(c, name, parent["id"], exclude_id=sub["id"])
         if slug != sub["slug"]:
             c.execute("INSERT INTO task_aliases (task_id, slug) VALUES (?, ?)", (sub["id"], sub["slug"]))
-        _touch(c, sub["id"], name=name, slug=slug, updated_at=now_iso())
-        _log(c, parent["id"], "subtask_renamed", old=sub["slug"], new=slug, source=source)
+        _touch(c, sub["id"], name=name, slug=slug)
+        _log_task(c, sub["id"], "renamed", old=sub["name"], new=name, source=source)
+        _log_task(c, parent["id"], "subtask_renamed", old=sub["slug"], new=slug, subtask_id=sub["id"],
+                  source=source)
         return {"parent": _base_dict(parent), "slug": slug, "name": name}
 
 
@@ -830,8 +1039,11 @@ def delete_subtask(ref: str, sub_ref: str, source: str | None = None) -> dict:
     with connect() as c:
         parent = _resolve(c, ref)
         sub = _resolve_subtask(c, parent["id"], sub_ref)
+        _log_task(c, sub["id"], "deleted", state=sub["state"], source=source)
+        _snapshot_history(c, sub["id"])
         c.execute("DELETE FROM tasks WHERE id = ?", (sub["id"],))
-        _log(c, parent["id"], "subtask_deleted", subtask=sub["slug"], state=sub["state"], source=source)
+        _log_task(c, parent["id"], "subtask_deleted", subtask=sub["slug"], subtask_id=sub["id"],
+                  state=sub["state"], source=source)
         return {"parent": _base_dict(parent), **_base_dict(sub)}
 
 
@@ -862,8 +1074,9 @@ def _project_code(conn, ref: str | None) -> str:
 
 
 def _default_project(conn) -> str:
-    conn.execute("INSERT OR IGNORE INTO projects (code, name) VALUES (?, 'General')",
-                 (DEFAULT_PROJECT,))
+    if conn.execute("INSERT OR IGNORE INTO projects (code, name) VALUES (?, 'General')",
+                    (DEFAULT_PROJECT,)).rowcount:
+        _log_event(conn, "project", "project_created", DEFAULT_PROJECT, name="General")
     return DEFAULT_PROJECT
 
 
@@ -899,7 +1112,22 @@ def _new_code(conn, name: str) -> str:
     return code
 
 
-def save_project(code: str | None, name: str, color: str | None = None) -> str:
+def _log_project_changes(conn, code: str, old, name: str | None, color: str | None,
+                         source: str | None) -> None:
+    """Log what changed on project code, given its row from before the write."""
+    if old is None:
+        _log_event(conn, "project", "project_created", code, name=name, color=color or None,
+                   source=source)
+        return
+    if name is not None and name != old["name"]:
+        _log_event(conn, "project", "project_renamed", code, old=old["name"], new=name, source=source)
+    if color is not None and color != old["color"]:
+        _log_event(conn, "project", "project_recolored", code, old=old["color"] or None, new=color,
+                   source=source)
+
+
+def save_project(code: str | None, name: str, color: str | None = None,
+                 source: str | None = None) -> str:
     """Add a project, or update the name (and color, if given) of an existing
     one. A new project without a code gets one derived from its name.
     Returns the project's code."""
@@ -909,19 +1137,23 @@ def save_project(code: str | None, name: str, color: str | None = None) -> str:
     with connect() as c:
         code = code or _new_code(c, name)
         _check_name_free(c, name, code)
+        old = c.execute("SELECT * FROM projects WHERE code = ?", (code,)).fetchone()
         c.execute(
             "INSERT INTO projects (code, name, color) VALUES (?, ?, ?) "
             "ON CONFLICT(code) DO UPDATE SET name = excluded.name, "
             "color = CASE WHEN ? IS NULL THEN projects.color ELSE excluded.color END",
             (code, name, color or "", color),
         )
+        _log_project_changes(c, code, old, name, color, source)
         return code
 
 
-def update_project(ref: str, name: str | None = None, color: str | None = None) -> str:
+def update_project(ref: str, name: str | None = None, color: str | None = None,
+                   source: str | None = None) -> str:
     """Rename or recolor a project given by code or name. Returns its code."""
     with connect() as c:
         code = _project_code(c, ref)
+        old = c.execute("SELECT * FROM projects WHERE code = ?", (code,)).fetchone()
         if name is not None:
             name = name.strip()
             if not name:
@@ -930,10 +1162,11 @@ def update_project(ref: str, name: str | None = None, color: str | None = None) 
             c.execute("UPDATE projects SET name = ? WHERE code = ?", (name, code))
         if color is not None:
             c.execute("UPDATE projects SET color = ? WHERE code = ?", (color, code))
+        _log_project_changes(c, code, old, name, color, source)
         return code
 
 
-def remove_project(ref: str) -> str:
+def remove_project(ref: str, source: str | None = None) -> str:
     """Remove an empty project. Returns its name."""
     with connect() as c:
         code = _project_code(c, ref)
@@ -943,20 +1176,22 @@ def remove_project(ref: str) -> str:
             raise Conflict(f"Project '{name}' still has {count} task(s) — "
                            f"merge it into another project instead")
         c.execute("DELETE FROM projects WHERE code = ?", (code,))
+        _log_event(c, "project", "project_removed", code, name=name, source=source)
         return name
 
 
-def _move_project_tasks(conn, old: str, new: str) -> int:
-    top = conn.execute(
-        "SELECT id FROM tasks WHERE parent_id IS NULL AND project = ?", (old,)
-    ).fetchall()
+def _move_project_tasks(conn, old: str, new: str, source: str | None = None) -> int:
+    """Move every task and subtask in project old to new. Returns how many
+    top-level tasks moved."""
+    rows = conn.execute("SELECT id, parent_id FROM tasks WHERE project = ?", (old,)).fetchall()
     conn.execute("UPDATE tasks SET project = ? WHERE project = ?", (new, old))
-    for r in top:
-        _log(conn, r["id"], "project_renamed", old_project=old, new_project=new)
-    return len(top)
+    for r in rows:
+        _log_task(conn, r["id"], "reprojected", old_project=old, new_project=new, via="merge",
+                  source=source)
+    return sum(1 for r in rows if r["parent_id"] is None)
 
 
-def merge_projects(from_ref: str, into_ref: str) -> tuple[str, str, int]:
+def merge_projects(from_ref: str, into_ref: str, source: str | None = None) -> tuple[str, str, int]:
     """Move every task in one project into another and drop the first.
     Returns (from name, into name, tasks moved)."""
     with connect() as c:
@@ -964,8 +1199,10 @@ def merge_projects(from_ref: str, into_ref: str) -> tuple[str, str, int]:
         if src == dst:
             raise ToledoError("Cannot merge a project into itself")
         names = _project_name(c, src), _project_name(c, dst)
-        count = _move_project_tasks(c, src, dst)
+        count = _move_project_tasks(c, src, dst, source)
         c.execute("DELETE FROM projects WHERE code = ?", (src,))
+        _log_event(c, "project", "project_merged", src, name=names[0], into=dst, into_name=names[1],
+                   count=count, source=source)
         return (*names, count)
 
 
@@ -976,12 +1213,17 @@ def load_glossary() -> dict[str, str]:
         return {r["term"]: r["canonical"] for r in c.execute("SELECT * FROM glossary ORDER BY term")}
 
 
-def set_glossary_term(term: str, canonical: str) -> None:
-    term, canonical = (term or "").strip(), (canonical or "").strip()
+def set_glossary_term(term: str, canonical: str, source: str | None = None) -> None:
+    term, canonical = (term or "").strip().lower(), (canonical or "").strip()
     if not term or not canonical:
         raise ToledoError("term and canonical are required")
     with connect() as c:
-        c.execute("INSERT OR REPLACE INTO glossary VALUES (?, ?)", (term.lower(), canonical))
+        old = c.execute("SELECT canonical FROM glossary WHERE term = ?", (term,)).fetchone()
+        if old and old["canonical"] == canonical:
+            return
+        c.execute("INSERT OR REPLACE INTO glossary VALUES (?, ?)", (term, canonical))
+        _log_event(c, "glossary", "glossary_set", term, old=old["canonical"] if old else None,
+                   new=canonical, source=source)
 
 
 def glossary_hits(text: str) -> list[tuple[str, str]]:
@@ -1075,6 +1317,8 @@ def add_journal(raw: str, summary: str | None = None, title: str | None = None,
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (date, (title or "").strip(), raw, summary, source, ts, ts),
         )
+        _log_event(c, "journal", "journal_added", cur.lastrowid, date=date,
+                   title=(title or "").strip() or None, source=source)
         return _journal_dict(c.execute("SELECT * FROM journal WHERE id = ?", (cur.lastrowid,)).fetchone())
 
 
@@ -1106,7 +1350,8 @@ def get_journal(ref=None) -> list[dict]:
 
 
 def update_journal(ref, raw: str | None = None, summary: str | None = None,
-                   title: str | None = None, date: str | None = None) -> dict:
+                   title: str | None = None, date: str | None = None,
+                   source: str | None = None) -> dict:
     """Change the given fields of one entry; None leaves a field as it is."""
     fields = {}
     if raw is not None:
@@ -1123,18 +1368,25 @@ def update_journal(ref, raw: str | None = None, summary: str | None = None,
         row = _resolve_journal(c, ref)
         if not (fields.get("raw", row["raw"]) or fields.get("summary", row["summary"])):
             raise ToledoError("an entry needs a raw or summary text")
+        changed = [k for k, v in fields.items() if v != row[k]]
         fields["updated_at"] = now_iso()
         cols = ", ".join(f"{k} = ?" for k in fields)
         c.execute(f"UPDATE journal SET {cols} WHERE id = ?", (*fields.values(), row["id"]))
+        if changed:
+            _log_event(c, "journal", "journal_updated", row["id"], date=row["entry_date"],
+                       fields=changed, new_date=fields.get("entry_date") if "entry_date" in changed else None,
+                       source=source)
         return _journal_dict(c.execute("SELECT * FROM journal WHERE id = ?", (row["id"],)).fetchone())
 
 
-def delete_journal(entry_id: int) -> dict:
+def delete_journal(entry_id: int, source: str | None = None) -> dict:
     with connect() as c:
         row = c.execute("SELECT * FROM journal WHERE id = ?", (int(entry_id),)).fetchone()
         if not row:
             raise NotFound(f"No journal entry #{entry_id}")
         c.execute("DELETE FROM journal WHERE id = ?", (row["id"],))
+        _log_event(c, "journal", "journal_deleted", row["id"], date=row["entry_date"],
+                   title=row["title"] or None, source=source)
         return _journal_dict(row, full=False)
 
 
@@ -1149,18 +1401,32 @@ def get_context() -> str | None:
         return t["slug"] if t else None
 
 
-def set_context(ref: str | None) -> str | None:
+def set_context(ref: str | None, source: str | None = None) -> str | None:
     with connect() as c:
+        old = c.execute("SELECT value FROM meta WHERE key = 'context'").fetchone()
+        old_id = int(old["value"]) if old and old["value"] else None
         if not ref:
             c.execute("DELETE FROM meta WHERE key = 'context'")
+            if old_id:
+                _log_context(c, "context_cleared", old_id, source=source)
             return None
         row = _resolve(c, ref)
         c.execute("INSERT OR REPLACE INTO meta VALUES ('context', ?)", (str(row["id"]),))
+        if row["id"] != old_id:
+            _log_context(c, "context_set", row["id"], source=source)
         return row["slug"]
 
 
+def _log_context(conn, action: str, task_id: int, **data) -> None:
+    # The pointer may outlive its task (a deleted task's id); log without it.
+    exists = conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    _log_event(conn, "context", action, task_id=task_id if exists else None, **data)
+
+
 def _clear_context_if(conn, task_id: int) -> None:
-    conn.execute("DELETE FROM meta WHERE key = 'context' AND value = ?", (str(task_id),))
+    """Drop the context pointer when its task is closed or deleted."""
+    if conn.execute("DELETE FROM meta WHERE key = 'context' AND value = ?", (str(task_id),)).rowcount:
+        _log_context(conn, "context_cleared", task_id, reason="task closed")
 
 
 # ── Legacy file-tree migration ────────────────────────────────────────────────

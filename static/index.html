@@ -185,6 +185,22 @@ body.panel-open #fab{right:436px}
 .jr-raw{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .jr-search{padding:8px 12px 4px}
 
+/* ── Activity ── */
+.act-row{display:flex;gap:10px;padding:7px 14px;border-bottom:1px solid var(--border);font-size:13px;align-items:baseline}
+.act-row.link{cursor:pointer}
+.act-row.link:hover{background:var(--surface)}
+.act-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.act-time{color:var(--muted);font-size:11px;min-width:38px;flex-shrink:0;font-variant-numeric:tabular-nums}
+.act-main{flex:1;min-width:0}
+.act-target{font-weight:500;overflow-wrap:anywhere}
+.act-target.gone{color:var(--muted);text-decoration:line-through}
+.act-parent{color:var(--muted);font-weight:400}
+.act-desc{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.act-src{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:0 5px;flex-shrink:0;text-transform:uppercase;letter-spacing:.3px}
+.act-scope{font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:.3px;margin-right:6px}
+.act-more{display:block;margin:12px auto 24px}
+.log-more{background:none;border:none;color:var(--accent);font:inherit;font-size:12px;font-weight:600;cursor:pointer;padding:8px 0 0}
+
 /* ── Section label ── */
 .sec{padding:12px 14px 4px;font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
 
@@ -466,6 +482,10 @@ body.panel-open #fab{right:436px}
         <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
         Journal
       </div>
+      <div class="ham-item" onclick="App.setView('activity')">
+        <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        Activity
+      </div>
       <div class="ham-item" onclick="App.setView('projects')">
         <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
         Edit Projects
@@ -575,6 +595,10 @@ const App = {
   journalList: [],
   journalQuery: '',
   journal: null,
+  // Activity: the loaded page(s) of the event log and its filters
+  activity: [],
+  activityMore: false,
+  activityFilter: { scope: '', project: '', action: '', task: '' },
 };
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -720,6 +744,7 @@ App.setView = function(v) {
   App.view = v;
   if (v === 'settings') { App.loadSettings(); return; }
   if (v === 'journal') { App.loadJournal().then(() => App.renderMain()); return; }
+  if (v === 'activity') { App.loadActivity().then(() => App.renderMain()); return; }
   App.loadTasks().then(() => App.renderMain());
 };
 
@@ -758,6 +783,11 @@ App.renderMain = function() {
     case 'journal':
       el.innerHTML = App.buildJournalView();
       fab.style.display = 'flex';
+      back.style.display = 'block';
+      break;
+    case 'activity':
+      el.innerHTML = App.buildActivityView();
+      fab.style.display = 'none';
       back.style.display = 'block';
       break;
     case 'settings':
@@ -1412,6 +1442,200 @@ App.submitJournal = async function() {
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
+// ── Event log ─────────────────────────────────────────────────────────────────
+// Action filter groups; legacy file-era actions (completed, due_set,
+// done_recurring, task-level project_renamed) sit beside their current names.
+const ACTIVITY_ACTIONS = {
+  '':          'Any Action',
+  created:     ['Created', 'created,subtask_created,project_created,journal_added'],
+  completed:   ['Completed', 'state_changed,completed,completed_recurring,done_recurring,subtask_completed,subtask_reopened,recurring_cancelled'],
+  deleted:     ['Deleted', 'deleted,subtask_deleted,project_removed,journal_deleted'],
+  edited:      ['Edited', 'renamed,subtask_renamed,description_updated,note_added,journal_updated,glossary_set'],
+  scheduled:   ['Due & recurrence', 'due_date_set,due_set,due_cleared,recurrence_set,recurrence_cleared'],
+  priority:    ['Priority', 'reprioritized'],
+  moved:       ['Moved project', 'reprojected,project_renamed,project_merged,project_recolored'],
+};
+const ACTIVITY_SCOPES = { '': 'Everything', task: 'Tasks', project: 'Projects', journal: 'Journal',
+  glossary: 'Glossary', context: 'Current task', system: 'System' };
+const SCOPE_TAGS = { project: 'Project', journal: 'Journal', glossary: 'Glossary',
+  context: 'Current task', system: 'System' };
+
+// One event as a sentence. f holds the event's fields: the flat entries of a
+// task's log, or an /api/activity event's data.
+function describeEvent(action, f, scope) {
+  const q = s => `“${s}”`;
+  const proj = code => code ? projName(code) : '?';
+  const state = { active: 'Reopened', completed: 'Completed', archive: 'Archived' };
+  const days = n => `${n} day${n == 1 ? '' : 's'}`;
+  // Parent-side subtask events hold the subtask's slug.
+  const sub = slug => String(slug || '').replace(/-/g, ' ');
+  switch (action) {
+    case 'created':
+      return 'Created' + (f.project ? ` in ${proj(f.project)}` : '') +
+        (f.priority != null ? ` · ${priLabel(f.priority)}` : '') + (f.due ? ` · due ${f.due}` : '');
+    case 'state_changed':      return state[f.to_state] || `Moved to ${f.to_state}`;
+    case 'completed':          return 'Completed';
+    case 'completed_recurring':
+    case 'done_recurring':     return 'Done for now' + (f.next_due ? ` · next due ${f.next_due}` : '');
+    case 'recurring_cancelled':return 'Recurrence cancelled';
+    case 'deleted':
+      return 'Deleted' + (f.subtasks ? ` with ${f.subtasks} subtask${f.subtasks == 1 ? '' : 's'}` : '');
+    case 'renamed':            return `Renamed from ${q(f.old)}`;
+    case 'reprioritized':
+      return `Priority ${priLabel(f.old_priority)} → ${priLabel(f.new_priority)}`;
+    case 'reprojected':
+      return `Moved from ${proj(f.old_project)} to ${proj(f.new_project)}` + (f.via === 'merge' ? ' (merge)' : '');
+    case 'project_renamed':
+      if (scope === 'project') return `Renamed from ${q(f.old)}`;
+      return `Moved from ${proj(f.old_project)} to ${proj(f.new_project)}`;
+    case 'due_date_set':
+    case 'due_set':            return `Due ${f.date || f.due || ''}`.trim();
+    case 'due_cleared':        return 'Due date cleared';
+    case 'recurrence_set':     return `Repeats every ${days(f.interval)}`;
+    case 'recurrence_cleared': return 'Stopped repeating';
+    case 'description_updated':return 'Description edited';
+    case 'note_added':         return 'Note added';
+    case 'subtask_created':    return `Subtask added: ${sub(f.subtask)}`;
+    case 'subtask_completed':  return `Subtask done: ${sub(f.subtask)}`;
+    case 'subtask_reopened':   return `Subtask reopened: ${sub(f.subtask)}`;
+    case 'subtask_renamed':    return `Subtask renamed: ${sub(f.old)} → ${sub(f.new)}`;
+    case 'subtask_deleted':    return `Subtask deleted: ${sub(f.subtask)}`;
+    case 'project_created':    return 'Project created';
+    case 'project_recolored':  return 'Color changed';
+    case 'project_removed':    return 'Project removed';
+    case 'project_merged':
+      return `Merged into ${f.into_name || proj(f.into)} · ${f.count} task${f.count == 1 ? '' : 's'} moved`;
+    case 'glossary_set':       return (f.old ? `${q(f.old)} → ` : '→ ') + q(f.new);
+    case 'journal_added':      return 'Entry added';
+    case 'journal_updated':
+      return 'Edited ' + (f.fields || []).map(k => k === 'entry_date' ? 'date' : k).join(', ') +
+        (f.new_date ? ` · moved to ${f.new_date}` : '');
+    case 'journal_deleted':    return 'Entry deleted';
+    case 'context_set':        return 'Set as current task';
+    case 'context_cleared':    return 'No longer current task' + (f.reason ? ` (${f.reason})` : '');
+    case 'schema_upgraded':    return `Database upgraded to schema ${f.to_version}`;
+  }
+  const extras = Object.entries(f).filter(([k]) => k !== 'source' && !k.endsWith('_id'))
+    .map(([k, v]) => `${k}=${v}`).join('  ');
+  return action.replace(/_/g, ' ') + (extras ? ` · ${extras}` : '');
+}
+
+function sourceTag(src) {
+  return src ? `<span class="act-src" title="Made via ${esc(src)}">${esc(src)}</span>` : '';
+}
+
+App.loadActivity = async function(append) {
+  const f = App.activityFilter;
+  const params = ['limit=101', 'offset=' + (append ? App.activity.length : 0)];
+  if (f.scope) params.push('scope=' + f.scope);
+  if (f.project) params.push('project=' + encodeURIComponent(f.project));
+  if (f.action) params.push('action=' + ACTIVITY_ACTIONS[f.action][1]);
+  if (f.task) params.push('task=' + encodeURIComponent(f.task));
+  try {
+    const page = await api('GET', '/api/activity?' + params.join('&'));
+    // One extra row tells whether there is another page.
+    App.activityMore = page.length > 100;
+    App.activity = (append ? App.activity : []).concat(page.slice(0, 100));
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.setActivityFilter = async function(key, value) {
+  App.activityFilter[key] = value;
+  await App.loadActivity();
+  App.renderMain();
+};
+
+// A task's whole history, its subtasks' included, from its Activity Log.
+App.showTaskActivity = function(slug) {
+  App.activityFilter = { scope: '', project: '', action: '', task: slug };
+  App.activityTaskName = App.task && App.task.slug === slug ? App.task.name : slug;
+  App.closePanel();
+  App.setView('activity');
+};
+
+App.moreActivity = async function() {
+  await App.loadActivity(true);
+  App.renderMain();
+};
+
+App.buildActivityView = function() {
+  const f = App.activityFilter;
+  const chevron = `<svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>`;
+  const dropdown = (id, key, label, options) => `<div class="filter-wrap">
+      <button class="filter-btn${f[key] ? ' active' : ''}" onclick="App.toggleDropdown('${id}',event)">${esc(label)} ${chevron}</button>
+      <div class="filter-dropdown" id="${id}">${options.map(([v, l]) =>
+        `<div class="fdd-item${f[key] === v ? ' on' : ''}" onclick='App.setActivityFilter(${JSON.stringify(key)},${JSON.stringify(v)})'>${esc(l)}</div>`
+      ).join('')}</div>
+    </div>`;
+  const actionLabel = a => a ? ACTIVITY_ACTIONS[a][0] : ACTIVITY_ACTIONS[''];
+  const filtered = f.scope || f.project || f.action || f.task;
+  const projects = [['', 'All Projects'], ...Object.keys(App.projects)
+    .map(c => [c, projName(c)]).sort((a, b) => a[1].localeCompare(b[1]))];
+  let html = `<div class="view-header">Activity</div>
+    <div class="filter-bar">
+      ${f.task ? `<button class="filter-btn active" onclick="App.setActivityFilter('task','')" title="Show all tasks">Task: ${esc(App.activityTaskName || f.task)} ✕</button>` : ''}
+      ${dropdown('act-scope-dd', 'scope', ACTIVITY_SCOPES[f.scope], Object.entries(ACTIVITY_SCOPES))}
+      ${dropdown('act-proj-dd', 'project', f.project ? projName(f.project) : 'All Projects', projects)}
+      ${dropdown('act-action-dd', 'action', actionLabel(f.action), Object.keys(ACTIVITY_ACTIONS).map(a => [a, actionLabel(a)]))}
+      ${filtered ? `<button class="filter-clear" onclick="App.clearActivityFilters()">Clear</button>` : ''}
+    </div>`;
+  if (!App.activity.length) {
+    return html + `<div class="empty"><div class="empty-icon">🕘</div><p>No activity${filtered ? ' matches these filters' : ' yet'}</p></div>`;
+  }
+  let day = null;
+  App.activity.forEach(e => {
+    const d = e.ts.slice(0, 10);
+    if (d !== day) {
+      day = d;
+      html += `<div class="sec">${esc(journalDay(d, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }))}</div>`;
+    }
+    html += App.activityRow(e);
+  });
+  if (App.activityMore) {
+    html += `<button class="abtn act-more" onclick="App.moreActivity()">Load older</button>`;
+  }
+  return html;
+};
+
+App.activityRow = function(e) {
+  const f = e.data || {};
+  let target, open = '';
+  if (e.slug) {
+    const parent = e.parent ? `<span class="act-parent">${esc(e.parent_name || e.parent)} › </span>` : '';
+    target = `${parent}<span class="act-target${e.deleted ? ' gone' : ''}">${esc(e.name || e.slug)}</span>`;
+    if (e.open) open = `App.openTask(${JSON.stringify(e.open)})`;
+  } else if (e.scope === 'project') {
+    target = `<span class="act-target">${esc(f.name || projName(e.ref))}</span>`;
+  } else if (e.scope === 'journal') {
+    target = `<span class="act-target">Journal ${esc(f.date || '')}${f.title ? ' · ' + esc(f.title) : ''}</span>`;
+    if (e.action !== 'journal_deleted') open = `App.openJournal(${JSON.stringify(Number(e.ref))})`;
+  } else if (e.scope === 'glossary') {
+    target = `<span class="act-target">${esc(e.ref)}</span>`;
+  } else if (e.scope === 'system') {
+    target = `<span class="act-target">Toledo</span>`;
+  } else {
+    target = `<span class="act-target">${esc(SCOPE_TAGS[e.scope] || e.scope)}</span>`;
+  }
+  const scope = e.scope !== 'task' ? `<span class="act-scope">${esc(SCOPE_TAGS[e.scope] || e.scope)}</span>` : '';
+  const attrs = open
+    ? ` class="act-row link" role="button" tabindex="0" onclick='${open}' onkeydown='if(event.key==="Enter"){${open}}'`
+    : ` class="act-row"`;
+  return `<div${attrs}>
+    <span class="act-time">${esc(e.ts.slice(11, 16))}</span>
+    <div class="act-main">
+      <div>${scope}${target}</div>
+      <div class="act-desc">${esc(describeEvent(e.action, f, e.scope))}</div>
+    </div>
+    ${sourceTag(f.source)}
+  </div>`;
+};
+
+App.clearActivityFilters = async function() {
+  App.activityFilter = { scope: '', project: '', action: '', task: '' };
+  await App.loadActivity();
+  App.renderMain();
+};
+
 // ── Task detail panel ─────────────────────────────────────────────────────────
 App.openTask = async function(slug) {
   try {
@@ -1590,13 +1814,12 @@ App.renderPanel = function() {
   if (tk.log && tk.log.length) {
     logHtml = [...tk.log].reverse().map(e => {
       const { ts, action, ...rest } = e;
-      const extras = Object.entries(rest).map(([k, v]) => `${k}=${v}`).join('  ');
       return `<div class="log-entry">
         <div class="log-ts">${ts.replace('T', ' ').slice(0, 16)}</div>
         <div class="log-body">
-          <div class="log-action">${esc(action)}</div>
-          ${extras ? `<div class="log-extras">${esc(extras)}</div>` : ''}
+          <div class="log-action">${esc(describeEvent(action, rest, 'task'))}</div>
         </div>
+        ${sourceTag(rest.source)}
       </div>`;
     }).join('');
   } else {
@@ -1605,7 +1828,9 @@ App.renderPanel = function() {
   body += `<div class="psec" style="border-bottom:none">
     <details class="log-details">
       <summary>Activity Log</summary>
-      <div class="log-inner">${logHtml}</div>
+      <div class="log-inner">${logHtml}
+        <button class="log-more" onclick='App.showTaskActivity(${JSON.stringify(tk.slug)})'>Full history with subtasks ›</button>
+      </div>
     </details>
   </div>`;
 

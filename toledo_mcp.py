@@ -63,6 +63,32 @@ def fmt_task_line(d: dict) -> str:
 
 # Activity fields that hold a project code, shown by name instead.
 _PROJECT_KEYS = {"project", "old_project", "new_project"}
+# Row ids and codes in activity data; useful to the web UI, noise to a model.
+# (A merge's 'into' code comes with 'into_name'.)
+_ID_KEYS = {"note_id", "history_id", "subtask_id", "into"}
+
+
+def fmt_event_fields(fields: dict) -> str:
+    rest = {k: db.project_name(v) if k in _PROJECT_KEYS else v
+            for k, v in fields.items() if k not in _ID_KEYS}
+    return "  " + "  ".join(f"{k}={v}" for k, v in rest.items()) if rest else ""
+
+
+def fmt_event_line(e: dict) -> str:
+    """One list_activity event: when, what, and the task or other target."""
+    ts = e["ts"][:16].replace("T", " ")
+    if e["slug"]:
+        target = f"{e['name']} [{e['parent'] + '/' if e['parent'] else ''}{e['slug']}]"
+        if e["deleted"]:
+            target += " (deleted)"
+    elif e["scope"] == "project":
+        # Events on a project that is gone carry its name.
+        target = e["data"].pop("name", None) or db.project_name(e["ref"])
+    elif e["scope"] == "journal":
+        target = f"journal #{e['ref']}"
+    else:
+        target = e["ref"] or e["scope"]
+    return f"{ts}  {e['action']:<20} {target}{fmt_event_fields(e['data'])}"
 
 
 def fmt_task_detail(d: dict) -> str:
@@ -99,9 +125,7 @@ def fmt_task_detail(d: dict) -> str:
         for e in reversed(d["activity"][-10:]):
             ts     = e.get("ts", "")[:16].replace("T", " ")
             action = e.get("action", "")
-            rest   = {k: db.project_name(v) if k in _PROJECT_KEYS else v
-                      for k, v in e.items() if k not in ("ts", "action")}
-            extra  = "  " + "  ".join(f"{k}={v}" for k, v in rest.items()) if rest else ""
+            extra  = fmt_event_fields({k: v for k, v in e.items() if k not in ("ts", "action")})
             lines.append(f"  {ts}  {action}{extra}")
 
     return "\n".join(lines)
@@ -190,6 +214,7 @@ available through the list_resources and get_resource tools.
 """
 
 server = Server("toledo", instructions=SERVER_INSTRUCTIONS)
+db.set_default_source("mcp")
 
 # Write tools that apply_changes accepts as ops.
 BATCH_OPS = {
@@ -603,6 +628,28 @@ async def list_tools() -> list[types.Tool]:
                     "date":    {"type": "string", "description": "Move the entry to another day, YYYY-MM-DD"},
                 },
                 "required": ["entry"],
+            },
+        ),
+        types.Tool(
+            name="list_activity",
+            description=(
+                "The event log, newest first: every change to tasks, subtasks, projects, the "
+                "glossary, the journal, and the current-task context, with who made it (source). "
+                "Use it to answer \"what changed since yesterday\" or to trace a task's history, "
+                "including deleted tasks."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "since":   {"type": "string", "description": "Earliest date (YYYY-MM-DD) or timestamp"},
+                    "until":   {"type": "string", "description": "Latest date (inclusive) or timestamp"},
+                    "task":    {"type": "string", "description": "Only this task and its subtasks"},
+                    "project": {"type": "string", "description": "Only this project's tasks and events"},
+                    "scope":   {"type": "string", "description": "task, project, glossary, journal, "
+                                                                 "context, or system; comma-separate several"},
+                    "action":  {"type": "string", "description": "e.g. state_changed, deleted; comma-separate several"},
+                    "limit":   {"type": "integer", "default": 50, "description": "Max events (default 50)"},
+                },
             },
         ),
         types.Tool(
@@ -1060,6 +1107,16 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         j = db.update_journal(args["entry"], raw=args.get("raw"), summary=args.get("summary"),
                               title=args.get("title"), date=args.get("date"))
         return ok(f"Journal updated: {jtag(j)}" + glossary_warning(j))
+
+    # ── Activity ──────────────────────────────────────────────────────────────
+    if name == "list_activity":
+        events = db.list_activity(limit=args.get("limit") or 50, since=args.get("since"),
+                                  until=args.get("until"), scope=args.get("scope"),
+                                  task=args.get("task"), action=args.get("action"),
+                                  project=args.get("project"))
+        if not events:
+            return ok("No activity found.")
+        return ok("\n".join(fmt_event_line(e) for e in events))
 
     # ── apply_changes ─────────────────────────────────────────────────────────
     if name == "apply_changes":
