@@ -20,12 +20,13 @@
   --surface2:  #242424;
   --surface3:  #2e2e2e;
   --accent:    #7a6acc;
+  --accent-text:#9183d5;
   --accent-dim:rgba(122,106,204,0.15);
   --danger:    #e74c3c;
   --warning:   #f0a500;
   --success:   #2ecc71;
   --text:      #e8e8e8;
-  --muted:     #777;
+  --muted:     #919191;
   --border:    #2a2a2a;
   --r:         8px;
   --top:       52px;
@@ -44,12 +45,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   width:24px;height:24px;border-radius:4px;flex-shrink:0;
 }
 .back-btn{
-  background:none;border:none;color:var(--accent);cursor:pointer;
+  background:none;border:none;color:var(--accent-text);cursor:pointer;
   font-size:22px;line-height:1;padding:4px 6px 4px 0;flex-shrink:0;
 }
 .brand{
   flex:1;font-family:'Playfair Display',Georgia,'Times New Roman',serif;
-  font-size:20px;font-weight:700;color:var(--accent);letter-spacing:-.2px;
+  font-size:20px;font-weight:700;color:var(--accent-text);letter-spacing:-.2px;
   user-select:none;
 }
 #ham-btn{
@@ -121,7 +122,7 @@ body.panel-open #fab{right:436px}
   padding:5px 10px;font-size:12px;font-weight:500;color:var(--text);
   cursor:pointer;font-family:inherit;transition:border-color .15s;white-space:nowrap;
 }
-.filter-btn.active{border-color:var(--accent);color:var(--accent)}
+.filter-btn.active{border-color:var(--accent);color:var(--accent-text)}
 .filter-btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0}
 .filter-dropdown{
   position:fixed;
@@ -138,9 +139,9 @@ body.panel-open #fab{right:436px}
 }
 .fdd-item:last-child{border-bottom:none}
 .fdd-item:hover{background:var(--surface2)}
-.fdd-item.on{color:var(--accent);font-weight:600}
+.fdd-item.on{color:var(--accent-text);font-weight:600}
 .fdd-item .fdd-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
-.fdd-item .fdd-check{margin-left:auto;color:var(--accent);font-size:14px;font-weight:700}
+.fdd-item .fdd-check{margin-left:auto;color:var(--accent-text);font-size:14px;font-weight:700}
 .filter-clear{
   padding:4px 10px;font-size:11px;font-weight:600;color:var(--accent);
   cursor:pointer;background:none;border:none;font-family:inherit;flex-shrink:0;
@@ -165,7 +166,7 @@ body.panel-open #fab{right:436px}
   font-size:11px;font-weight:600;padding:2px 7px;border-radius:4px;flex-shrink:0;
 }
 .tag-chip{
-  font-size:11px;color:var(--accent);background:var(--accent-dim);
+  font-size:11px;color:var(--accent-text);background:var(--accent-dim);
   padding:1px 7px;border-radius:10px;white-space:nowrap;cursor:pointer;
   border:none;font-family:inherit;line-height:1.5;
 }
@@ -178,10 +179,10 @@ body.panel-open #fab{right:436px}
 .meta-right{display:flex;gap:6px;align-items:center;margin-left:auto;flex-shrink:0}
 .due{font-size:12px;color:var(--muted)}
 .due.over{color:var(--danger);font-weight:700;background:rgba(231,76,60,.15);padding:1px 6px;border-radius:4px}
-.rec-tag{font-size:11px;color:#9b59b6}
+.rec-tag{font-size:11px;color:#a66abe}
 .sub-count{font-size:11px;color:var(--muted)}
 .state-tag{font-size:11px;padding:2px 6px;border-radius:4px}
-.s-active{background:var(--accent-dim);color:var(--accent)}
+.s-active{background:var(--accent-dim);color:var(--accent-text)}
 .s-completed{background:rgba(46,204,113,.15);color:var(--success)}
 .s-archive{background:rgba(136,136,136,.12);color:var(--muted)}
 
@@ -263,7 +264,7 @@ body.panel-open #fab{right:436px}
   background:var(--surface);border-bottom:1px solid var(--border);
   padding:11px 14px;display:flex;align-items:flex-start;gap:10px;flex-shrink:0;
 }
-.panel-back{background:none;border:none;color:var(--accent);cursor:pointer;padding:4px;flex-shrink:0;font-size:20px;line-height:1;margin-top:1px}
+.panel-back{background:none;border:none;color:var(--accent-text);cursor:pointer;padding:4px;flex-shrink:0;font-size:20px;line-height:1;margin-top:1px}
 .panel-info{flex:1;min-width:0}
 .panel-info h2{font-size:16px;font-weight:600;word-break:break-word}
 .panel-crumb{background:none;border:none;padding:0;margin-bottom:4px;color:var(--muted);font:inherit;font-size:12px;cursor:pointer;text-align:left}
@@ -564,13 +565,13 @@ function priLabel(n) {
 }
 function priColor(n) {
   n = parseInt(n);
-  if (n >= 76)  return '#c0392b';
-  if (n === 75) return '#e74c3c';
+  if (n >= 76)  return '#d16d63';
+  if (n === 75) return '#e95c4e';
   if (n >= 51)  return '#e67e22';
   if (n === 50) return '#f0a500';
-  if (n >= 26)  return '#2980b9';
+  if (n >= 26)  return '#4691c2';
   if (n === 25) return '#27ae60';
-  return '#555';
+  return '#8b8b8b';
 }
 
 // List badge: solid only for Ultra High, tinted below that.
@@ -589,6 +590,29 @@ function hexToRgba(hex, alpha) {
   const g = parseInt(hex.slice(3,5), 16) || 156;
   const b = parseInt(hex.slice(5,7), 16) || 232;
   return `rgba(${r},${g},${b},${alpha})`;
+}
+// User-picked project colors can be too dark to read as text on the dark theme.
+// Lighten toward white just enough to clear WCAG AA (4.5:1) against the surface
+// it's actually rendered on (a solid surface, or its own alpha tint over one).
+function relLuminance([r, g, b]) {
+  const a = [r, g, b].map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+  return 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+}
+function contrastRatio(fg, bg) {
+  const l1 = relLuminance(fg) + 0.05, l2 = relLuminance(bg) + 0.05;
+  return l1 > l2 ? l1 / l2 : l2 / l1;
+}
+function readableAccent(hex, surfaceRgb, tintAlpha = 0) {
+  const base = [parseInt(hex.slice(1,3), 16) || 107, parseInt(hex.slice(3,5), 16) || 156, parseInt(hex.slice(5,7), 16) || 232];
+  const bg = tintAlpha > 0
+    ? base.map((c, i) => c * tintAlpha + surfaceRgb[i] * (1 - tintAlpha))
+    : surfaceRgb;
+  let rgb = base;
+  for (let t = 0; t <= 1.0001; t += 0.02) {
+    rgb = base.map(c => c + (255 - c) * t);
+    if (contrastRatio(rgb, bg) >= 4.5) break;
+  }
+  return '#' + rgb.map(c => Math.round(Math.min(255, c)).toString(16).padStart(2, '0')).join('');
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -1201,8 +1225,9 @@ App.buildCard = function(t, showState) {
       ).join('')}</span>` : '';
 
   const pl = priLabel(t.priority);
-  const pColor = projColor(t.project);
-  const pBg = hexToRgba(pColor, 0.15);
+  const pColorRaw = projColor(t.project);
+  const pBg = hexToRgba(pColorRaw, 0.15);
+  const pColor = readableAccent(pColorRaw, [26, 26, 26], 0.15);
   const cls = 'card' + (t.overdue ? ' overdue' : '') + (App.task && App.panelOpen() && App.task.ref === t.slug ? ' selected' : '');
 
   return `<div class="${cls}" role="button" tabindex="0" data-slug="${esc(t.slug)}" onclick='App.openTask(${JSON.stringify(t.slug)})'>
@@ -1835,16 +1860,16 @@ App.renderPanel = function() {
   </button>`;
 
   // Project pill
-  const tkProjColor = projColor(tk.project);
-  const tkProjBg = hexToRgba(tkProjColor, 0.15);
+  const tkProjColorRaw = projColor(tk.project);
+  const tkProjColor = readableAccent(tkProjColorRaw, [36, 36, 36], 0);
   // A subtask's project is its parent's.
   metaPills += tk.parent
-    ? `<span class="meta-pill" style="cursor:default;border-color:${hexToRgba(tkProjColor,.3)}" title="Set by the parent task">
+    ? `<span class="meta-pill" style="cursor:default;border-color:${hexToRgba(tkProjColorRaw,.3)}" title="Set by the parent task">
     <span class="lbl">Project</span>
     <span class="val" style="color:${tkProjColor}">${esc(projName(tk.project))}</span>
   </span>`
     : `<button class="meta-pill" onclick="App.openSheet('change-project')" title="Change project"
-    style="border-color:${hexToRgba(tkProjColor,.3)}">
+    style="border-color:${hexToRgba(tkProjColorRaw,.3)}">
     <span class="lbl">Project</span>
     <span class="val" style="color:${tkProjColor}">${esc(projName(tk.project))}</span>
     <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
