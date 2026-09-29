@@ -1478,9 +1478,7 @@ async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPr
     }
     if name not in prompts:
         raise ValueError(f"Unknown prompt: {name}")
-    # The audit reviews every state; the daily sessions only need active tasks.
-    state = "all" if name == "periodic_audit" else "active"
-    return types.GetPromptResult(messages=[_prompt_message(prompts[name] + await _snapshot(state))])
+    return types.GetPromptResult(messages=[_prompt_message(prompts[name] + await _snapshot("active"))])
 
 
 async def _snapshot(state: str) -> str:
