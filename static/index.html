@@ -42,7 +42,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   display:flex;align-items:center;padding:0 10px 0 14px;z-index:100;gap:8px;
 }
 .brand-icon{
-  width:24px;height:24px;border-radius:4px;flex-shrink:0;
+  width:24px;height:24px;border-radius:4px;flex-shrink:0;cursor:pointer;
 }
 .back-btn{
   background:none;border:none;color:var(--accent-text);cursor:pointer;
@@ -51,7 +51,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .brand{
   flex:1;font-family:'Playfair Display',Georgia,'Times New Roman',serif;
   font-size:20px;font-weight:700;color:var(--accent-text);letter-spacing:-.2px;
-  user-select:none;
+  user-select:none;cursor:pointer;
 }
 #ham-btn{
   background:none;border:none;color:var(--text);cursor:pointer;
@@ -475,8 +475,8 @@ body.panel-open #fab{right:436px}
 
 <div id="topbar">
   <button class="back-btn" id="back-btn" onclick="App.goHome()" style="display:none">‹</button>
-  <img src="/static/icon-192.png" class="brand-icon" alt="TOleDO Logo">
-  <h1 class="brand">TOleDO</h1>
+  <img src="/static/icon-192.png" class="brand-icon" alt="TOleDO Logo" onclick="App.openSheet('about')" title="About Toledo">
+  <h1 class="brand" onclick="App.openSheet('about')" title="About Toledo">TOleDO</h1>
   <div id="ham-wrap">
     <button id="ham-btn" onclick="App.toggleHamMenu(event)" title="Menu">
       <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
@@ -550,7 +550,7 @@ body.panel-open #fab{right:436px}
 <script>
 const $ = id => document.getElementById(id);
 // Stamped by the server when it serves this page.
-const BUILD = { commit: '__TOLEDO_COMMIT__', ui: '__TOLEDO_UI_BUILD__' };
+const BUILD = { commit: '__TOLEDO_COMMIT__', built: '__TOLEDO_BUILD_TIME__', ui: '__TOLEDO_UI_BUILD__' };
 
 // ── Priority helpers ──────────────────────────────────────────────────────────
 function priLabel(n) {
@@ -722,12 +722,33 @@ App.checkVersion = async function() {
     const r = await fetch('/api/version', { credentials: 'include', headers: { 'Accept': 'application/json' } });
     if (!r.ok) return;
     const v = await r.json();
+    App.serverVersion = v;
     const started = new Date(v.started).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
     const el = $('ham-build');
     el.textContent = `Build ${BUILD.commit} · deployed ${started}`;
     el.title = `Page UI ${BUILD.ui}, server UI ${v.ui}, server commit ${v.commit}`;
     $('update-bar').classList.toggle('show', v.ui !== BUILD.ui);
   } catch(e) { /* offline or signed out; nothing to compare */ }
+};
+
+// Shown in the About dialog (logo tap): the build this page was served from
+// plus what the server is currently running, so a stale deploy is obvious.
+App.aboutBody = function() {
+  const v = App.serverVersion;
+  const fmtTs = iso => {
+    if (!iso || iso === 'unknown') return 'Unknown';
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toLocaleString([], {year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+  };
+  const stale = v && v.ui !== BUILD.ui;
+  return `
+    <div class="fg"><label>Commit</label><div style="font-family:ui-monospace,monospace">${esc(v?.commit || BUILD.commit)}</div></div>
+    <div class="fg"><label>Built</label><div>${esc(fmtTs(v?.built))}</div></div>
+    <div class="fg"><label>Server running since</label><div>${esc(v ? fmtTs(v.started) : 'Unknown')}</div></div>
+    ${stale ? `<div class="fg"><label>⚠ Stale page</label><div>This page is an older UI build than the server. <button class="btn btn-p" style="margin-top:6px" onclick="location.reload()">Reload</button></div></div>` : ''}
+    <div class="btn-row">
+      <button class="btn btn-s" onclick="App.closeSheet()">Close</button>
+    </div>`;
 };
 
 App.loadTasks = async function() {
@@ -2246,6 +2267,10 @@ App.openSheet = function(type) {
           <button class="btn btn-p" onclick="App.submitNewProject()">Add</button>
         </div>`,
     },
+    'about': {
+      title: 'About Toledo',
+      body: () => App.aboutBody(),
+    },
   };
 
   const cfg = configs[type];
@@ -2257,6 +2282,8 @@ App.openSheet = function(type) {
   $('overlay').classList.add('open');
   $('sheet').classList.add('open');
   setTimeout(() => { const f = $('sheet-body').querySelector('input:not([disabled]):not([type=color]),textarea'); if (f) f.focus(); }, 280);
+  // Refresh with a live read in case the cached check is stale or hasn't run yet.
+  if (type === 'about') App.checkVersion().then(() => { if (App.sheetType === 'about') $('sheet-body').innerHTML = App.aboutBody(); });
 };
 
 App.journalForm = function(j) {

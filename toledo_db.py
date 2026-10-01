@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -298,6 +299,29 @@ def connect():
 
 
 # ── Small helpers ─────────────────────────────────────────────────────────────
+
+def release_version() -> dict:
+    """Code identity for this running process: the commit it was built from and
+    when that build happened. Both the web server and MCP server call this so
+    they agree on the same answer. Sourced from $TOLEDO_COMMIT / $TOLEDO_BUILD_TIME
+    (set by the Docker build — the image has no .git to read them from), falling
+    back to the local checkout's HEAD for a dev run outside Docker."""
+    commit = os.environ.get("TOLEDO_COMMIT", "").strip()[:12]
+    built = os.environ.get("TOLEDO_BUILD_TIME", "").strip()
+    if not (commit and built):
+        try:
+            out = subprocess.run(
+                ["git", "log", "-1", "--format=%h|%cI"], cwd=Path(__file__).parent,
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                git_commit, git_built = out.stdout.strip().split("|", 1)
+                commit = commit or git_commit
+                built = built or git_built
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return {"commit": commit or "unknown", "built": built or "unknown"}
+
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")

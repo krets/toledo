@@ -24,6 +24,8 @@ from starlette.routing import Route
 
 import toledo_db as db
 
+RELEASE = db.release_version()
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def pri_label(n: int) -> str:
@@ -227,9 +229,13 @@ back with list_journal / get_journal. The newest entries come first.
 
 Resources (status, projects, tags, active tasks, glossary, recent journal) are likewise \
 available through the list_resources and get_resource tools.
-"""
 
-server = Server("toledo", instructions=SERVER_INSTRUCTIONS)
+Running build {commit}, built {built}. If something described elsewhere (a task, a \
+conversation) doesn't match what the tools actually do, this build may be older than that \
+description — check this line against the latest commit.
+""".format(**RELEASE)
+
+server = Server("toledo", version=RELEASE["commit"], instructions=SERVER_INSTRUCTIONS)
 db.set_default_source("mcp")
 
 # Write tools that apply_changes accepts as ops.

@@ -6,6 +6,7 @@ services:
       context: .
       args:
         TOLEDO_COMMIT: ${TOLEDO_COMMIT:-}
+        TOLEDO_BUILD_TIME: ${TOLEDO_BUILD_TIME:-}
     container_name: toledo-server
     ports:
       - "4321:4321"
@@ -19,6 +20,7 @@ services:
       context: .
       args:
         TOLEDO_COMMIT: ${TOLEDO_COMMIT:-}
+        TOLEDO_BUILD_TIME: ${TOLEDO_BUILD_TIME:-}
     container_name: toledo-mcp
     ports:
       - "4322:4322"

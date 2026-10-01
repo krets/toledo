@@ -3,8 +3,6 @@
 
 import hashlib
 import json
-import os
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -16,23 +14,9 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 db.set_default_source("web")
 STARTED = datetime.now().isoformat(timespec="seconds")
 
-
-def _release_commit() -> str:
-    """$TOLEDO_COMMIT (set by the Docker build), else the checkout's HEAD."""
-    commit = os.environ.get("TOLEDO_COMMIT", "").strip()
-    if commit:
-        return commit[:12]
-    try:
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent,
-                             capture_output=True, text=True, timeout=5)
-        if out.returncode == 0:
-            return out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return "unknown"
-
-
-COMMIT = _release_commit()
+RELEASE = db.release_version()
+COMMIT = RELEASE["commit"]
+BUILT = RELEASE["built"]
 # Changes whenever the web UI does. The page carries the value it was served
 # with and compares it with /api/version to notice it is a stale copy.
 UI_BUILD = hashlib.sha1(b"".join(
@@ -41,7 +25,9 @@ UI_BUILD = hashlib.sha1(b"".join(
 
 
 def _stamp(text: str) -> str:
-    return text.replace("__TOLEDO_COMMIT__", COMMIT).replace("__TOLEDO_UI_BUILD__", UI_BUILD)
+    return (text.replace("__TOLEDO_COMMIT__", COMMIT)
+                .replace("__TOLEDO_BUILD_TIME__", BUILT)
+                .replace("__TOLEDO_UI_BUILD__", UI_BUILD))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -105,7 +91,7 @@ def index():
 
 @app.route("/api/version")
 def version():
-    return jsonify({"commit": COMMIT, "ui": UI_BUILD, "started": STARTED})
+    return jsonify({"commit": COMMIT, "built": BUILT, "ui": UI_BUILD, "started": STARTED})
 
 @app.route("/manifest.json")
 def manifest():

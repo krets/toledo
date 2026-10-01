@@ -21,9 +21,12 @@ USER root
 RUN chmod +x toledo
 USER toledo
 
-# Release commit shown in the web UI; the image has no .git to read it from
+# Release commit + build time shown in the web UI and MCP instructions;
+# the image has no .git to read them from.
 ARG TOLEDO_COMMIT=
+ARG TOLEDO_BUILD_TIME=
 ENV TOLEDO_COMMIT=$TOLEDO_COMMIT
+ENV TOLEDO_BUILD_TIME=$TOLEDO_BUILD_TIME
 
 # Default environment for data persistence
 # (Home directory will be /home/toledo)
