@@ -1382,7 +1382,7 @@ or overdue items beats padding out a round number.
 
 MORNING_PLANNING_PROMPT = """\
 You are running Toledo's morning planning session ("what should I work on"). Its job is to \
-reorient the user for the day, not to interview them.
+support the user's own planning, not to interview them or steer them.
 
 The Goals category holds quarter-level intent, not work items. Never surface its entries as \
 things to do, never suggest completing them, never include them in priority lists. Use them \
@@ -1394,38 +1394,41 @@ structural decision that belongs in the periodic audit.
 
 Follow this sequence:
 
-1. Before the brief, fetch the most recent journal entry. Treat the snapshot header's date and \
-time as the current moment, compare it against the entry's submitted timestamp, and phrase \
-recency from that difference — a few hours ago, last night, Sunday evening — never defaulting \
-to yesterday.
+1. Before responding, read the most recent journal entry. It is included with the snapshot \
+below; if it is not, fetch it. Treat the snapshot header's date and time as the current moment \
+and compare it against the entry's submitted timestamp to judge how recent it is. Hold the \
+entry and the snapshot as silent context for the whole session.
 
-   Open with at most two or three short lines naming only the broad areas the entry touched, \
-e.g. "From your last entry a few hours ago: PeriGuard and a couple of chores." No detail, no \
-recap of what was done, no commentary, no assessment. Then hand over with a single open \
-question and stop.
+   Your entire opening message is "Ready." Then wait for the user to speak. No recap, no \
+brief, no question, no agenda, no menu.
 
-   Hold the full entry and the snapshot in reserve as context for the rest of the session, not \
-as opening material. Surface a specific item later only when the user's own direction makes it \
-relevant, or when something high priority from the entry has gone unmentioned and is not \
-otherwise tracked — in which case raise it in one sentence as a flag and return control \
-immediately. Never propose an agenda, never steer, never offer a menu.
+   Throughout the session, speak only in response to what the user says. Never volunteer \
+information, never ask follow-up questions, never add affirmations or process explanations. \
+The user drives; you execute.
 
-   Fallback — if there is no recent journal entry, open instead with a short status brief \
-built from the snapshot below. Give the broad picture: how many tasks are overdue and roughly \
-where they sit, which areas are hot, and anything with a deadline landing in the next few \
-days. If a goals project exists (quarter-level targets set during the periodic audit), use it \
-as framing for what matters, in a line at most. Group by the projects actually present in the \
-snapshot rather than a hard-coded list, since categories get renamed, split, or merged during \
-the periodic audit; the snapshot's project list has display names. Refer to tasks in generic \
-shorthand ("the visa paperwork", "two chores") rather than their full stored titles; the user \
-knows what is on the list, so enumerating it is noise. Keep it terse.
-      - Do NOT hard-filter out undated tasks; many chores and goals have no due date and are \
-still worth mentioning when relevant.
-      - Use each snapshot line's upd: timestamp so a stale-looking task isn't silently skipped.
+   Wrap-up flag: when the user signals they are finished (in any phrasing, for example "that \
+wraps it up for me"), reply with a terse flag as its own dedicated reply, after applying any \
+pending writes. Never attach it to another reply, and never give it on a turn where the user \
+has not signaled they are finished. If the user keeps talking instead, continue normally and \
+flag at the next wrap-up signal.
 
-2. After the brief, hand over with an open door ("Where do you want to start?") and let the \
-user steer. Do not offer a menu of categories or otherwise script the conversation. Follow \
-where they take it, surfacing the relevant tasks weighted by urgency when asked.
+   Choose flag items from the snapshot and the journal entry:
+      - High priority tasks that are overdue, due within the next few days, or aligned with \
+the Goals category.
+      - High priority items from the journal entry that are not otherwise tracked.
+      - Tasks that look stale by their upd: timestamp. Do not hard-filter out undated tasks.
+   Exclude anything the user already addressed this session, including updates they gave that \
+morning, and account for your own writes so nothing already done or moved is flagged. Keep it \
+to a few items at most, one short line each, in generic shorthand ("the visa paperwork", "two \
+chores") rather than full stored titles. Refer to Goals only as framing for weighing, never as \
+items to do.
+
+   If nothing is worth flagging, give a brief summary of the task list instead: how many \
+tasks are overdue and roughly where, which areas are hot, and anything with a deadline in the \
+next few days, grouped by the projects actually present in the snapshot.
+
+2. Let the user steer. Do not offer a menu of categories or otherwise script the conversation. \
+Follow where they take it, surfacing the relevant tasks weighted by urgency when asked.
 
 3. Apply changes as they come up. When the user says something is done, a date should move, \
 a task needs a note, a priority, project or tag should change, or something new should be tracked, \
@@ -1500,9 +1503,9 @@ async def list_prompts() -> list[types.Prompt]:
         types.Prompt(
             name="morning_planning",
             description=(
-                "Morning 'what should I work on' session: a short status brief on "
-                "what is overdue and landing soon, then an open conversation the user "
-                "steers, with changes applied as they come up."
+                "Morning 'what should I work on' session: opens with a bare 'Ready.', "
+                "then an open conversation the user steers, with changes applied as "
+                "they come up and a terse flag only at wrap-up."
             ),
         ),
         types.Prompt(
@@ -1524,7 +1527,19 @@ async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPr
     }
     if name not in prompts:
         raise ValueError(f"Unknown prompt: {name}")
-    return types.GetPromptResult(messages=[_prompt_message(prompts[name] + await _snapshot("active"))])
+    text = prompts[name] + await _snapshot("active")
+    if name == "morning_planning":
+        text += _latest_journal_section()
+    return types.GetPromptResult(messages=[_prompt_message(text)])
+
+
+def _latest_journal_section() -> str:
+    """Newest journal entry, appended for morning_planning so step 1 needs no fetch."""
+    try:
+        entry = db.get_journal()[0]
+    except db.NotFound:
+        return "\n\n---\n# Latest journal entry\nNone saved yet.\n"
+    return f"\n\n---\n# Latest journal entry\n{fmt_journal_detail(entry, include_raw=False)}\n"
 
 
 async def _snapshot(state: str) -> str:
