@@ -16,6 +16,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from collections import defaultdict
@@ -167,6 +168,52 @@ def weather_line(data, llm):
 
 
 BRIEF_EVENT_LIMIT = 8
+MATCH_WINDOW = timedelta(minutes=60)
+MATCH_STOPWORDS = {"berlin", "germany", "deutschland", "gmbh", "the", "and", "und", "der", "die", "das", "str",
+                   "strasse", "straße", "street", "platz", "event", "events", "meetup", "berlins"}
+
+
+def tokens(text):
+    """Distinctive lowercase words: no short words, bare numbers (house numbers, postcodes) or filler."""
+    words = re.findall(r"[^\W_]+", (text or "").lower())
+    return {w for w in words if len(w) >= 3 and not w.isdigit() and w not in MATCH_STOPWORDS}
+
+
+def same_place(ev, cal):
+    """Calendar location text names the event's venue (its name, or two or more address words)."""
+    loc = ev["location"]
+    cal_tokens = tokens(cal["location"])
+    name = tokens(loc["name"])
+    if name and name <= cal_tokens:
+        return True
+    return len((name | tokens(loc["address"])) & cal_tokens) >= 2
+
+
+def same_title(ev, cal):
+    a, b = tokens(ev["title"]), tokens(cal["title"])
+    if not a or not b:
+        return False
+    common = a & b
+    return len(common) >= 2 and (len(common) / len(a | b) >= 0.5 or common in (a, b))
+
+
+def calendar_matches(ev, cal_events):
+    """True when a timed calendar entry starts within an hour of the event and shares its venue or title."""
+    start = datetime.fromisoformat(ev["start"])
+    for c in cal_events:
+        if c["all_day"] or abs(datetime.fromisoformat(c["start"]) - start) > MATCH_WINDOW:
+            continue
+        if same_place(ev, c) or same_title(ev, c):
+            return True
+    return False
+
+
+def drop_accepted(rows, calendar):
+    """(rows not already on the calendar, how many were)."""
+    if not rows or not calendar:
+        return rows, 0
+    keep = [e for e in rows if not calendar_matches(e, calendar["events"])]
+    return keep, len(rows) - len(keep)
 
 
 def events_section(rows, status, days, limit=BRIEF_EVENT_LIMIT):
@@ -297,6 +344,10 @@ def main(argv=None):
         if not args.from_raw:
             state.sync_events(conn, sections_data["events"])
         sections_data["events"] = state.visible(conn, sections_data["events"])[0]
+    if sections_data.get("events") is not None:  # signed up for outside Toledo: already on the calendar
+        sections_data["events"], on_calendar = drop_accepted(sections_data["events"], sections_data.get("calendar"))
+        if on_calendar:
+            print(f"events: {on_calendar} already on the calendar, hidden", file=sys.stderr)
 
     now = datetime.now(tz)
     md = [f"# Morning context — {now.strftime('%A, %B %d, %Y').replace(' 0', ' ')}", "",
