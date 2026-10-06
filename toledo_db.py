@@ -800,6 +800,11 @@ def _split(value) -> list[str]:
     """A filter given as a list or a comma-separated string."""
     if not value:
         return []
+    if isinstance(value, str) and value.lstrip().startswith("["):
+        try:  # a JSON array that reached us as a string, e.g. '["a", "b"]'
+            value = json.loads(value)
+        except ValueError:
+            pass
     items = value if isinstance(value, (list, tuple)) else str(value).split(",")
     return [str(v).strip() for v in items if str(v).strip()]
 
