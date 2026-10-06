@@ -217,6 +217,21 @@ def task_note(slug):
     return jsonify({"ok": True})
 
 
+@app.route("/api/tasks/<slug>/notes/<int:note_id>", methods=["PATCH"])
+def task_note_update(slug, note_id):
+    data, err, code = require_json("text")
+    if err:
+        return err, code
+    db.update_note(slug, note_id, data["text"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/tasks/<slug>/notes/<int:note_id>", methods=["DELETE"])
+def task_note_delete(slug, note_id):
+    db.delete_note(slug, note_id)
+    return jsonify({"deleted": True})
+
+
 @app.route("/api/tasks/<slug>/due", methods=["POST"])
 def task_due(slug):
     data = request.json or {}

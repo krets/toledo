@@ -80,7 +80,7 @@ def fmt_task_line(d: dict) -> str:
 _PROJECT_KEYS = {"project", "old_project", "new_project"}
 # Row ids and codes in activity data; useful to the web UI, noise to a model.
 # (A merge's 'into' code comes with 'into_name'.)
-_ID_KEYS = {"note_id", "history_id", "subtask_id", "into"}
+_ID_KEYS = {"note_id", "history_id", "subtask_id", "into", "old_text"}
 
 
 def fmt_event_fields(fields: dict) -> str:
@@ -139,7 +139,7 @@ def fmt_task_detail(d: dict) -> str:
 
     if d.get("notes"):
         lines.append("\n## Notes")
-        lines.append(db.render_worklog(d["notes"]).strip())
+        lines.append(db.render_worklog(d["notes"], ids=True).strip())
 
     if d.get("activity"):
         lines.append("\n## Recent Activity")
@@ -460,14 +460,20 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="add_note",
-            description="Append a timestamped note to a task's worklog.",
+            description=(
+                "Append a timestamped note to a task's worklog. To change an existing note, "
+                "pass its note_id (the '#id' get_task shows in the note's heading) with the "
+                "replacement text in note, or with delete=true to remove it."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "task": TASK_REF,
-                    "note": {"type": "string"},
+                    "note": {"type": "string", "description": "Note text; the new text when note_id is given"},
+                    "note_id": {"type": "integer", "description": "Existing note to edit or delete"},
+                    "delete": {"type": "boolean", "description": "With note_id, delete that note (note not needed)"},
                 },
-                "required": ["task", "note"],
+                "required": ["task"],
             },
         ),
         types.Tool(
@@ -1079,8 +1085,24 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
 
     # ── add_note ──────────────────────────────────────────────────────────────
     if name == "add_note":
-        d = db.add_note(args["task"], args["note"])
-        return ok(f"Note added to {tag(d)}")
+        if args.get("note_id") is None:
+            if args.get("delete"):
+                raise ValueError("delete needs a note_id")
+            if "note" not in args:
+                raise ValueError("Missing required argument(s) for 'add_note': note")
+            d = db.add_note(args["task"], args["note"])
+            return ok(f"Note added to {tag(d)}")
+        try:
+            note_id = int(str(args["note_id"]).lstrip("#"))
+        except ValueError:
+            raise ValueError(f"note_id must be a number, got '{args['note_id']}'")
+        if args.get("delete"):
+            d = db.delete_note(args["task"], note_id)
+            return ok(f"Note #{note_id} deleted from {tag(d)}")
+        if "note" not in args:
+            raise ValueError("Pass note with the new text, or delete=true, along with note_id")
+        d = db.update_note(args["task"], note_id, args["note"])
+        return ok(f"Note #{note_id} updated on {tag(d)}")
 
     # ── update_description ────────────────────────────────────────────────────
     if name == "update_description":

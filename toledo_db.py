@@ -538,9 +538,9 @@ def _detail(conn, row) -> dict:
     d = _dicts(conn, [row])[0]
     d["description"] = row["description"]
     d["notes"] = [
-        {"ts": r["ts"], "text": r["text"], "source": r["source"]}
+        {"id": r["id"], "ts": r["ts"], "text": r["text"], "source": r["source"]}
         for r in conn.execute(
-            "SELECT ts, text, source FROM notes WHERE task_id = ? ORDER BY ts, id", (row["id"],)
+            "SELECT id, ts, text, source FROM notes WHERE task_id = ? ORDER BY ts, id", (row["id"],)
         )
     ]
     d["activity"] = [
@@ -553,13 +553,16 @@ def _detail(conn, row) -> dict:
     return d
 
 
-def render_worklog(notes: list[dict]) -> str:
-    """Notes as the legacy worklog.md text ('### ts' headed entries)."""
+def render_worklog(notes: list[dict], ids: bool = False) -> str:
+    """Notes as the legacy worklog.md text ('### ts' headed entries);
+    ids=True appends each note's '#id' so it can be edited or deleted."""
     parts = []
     for n in notes:
         ts = (n["ts"] or "")[:16].replace("T", " ")
         if n.get("source") == "chat":
             ts += " (Chat)"
+        if ids:
+            ts += f" (#{n['id']})"
         parts.append(f"### {ts}\n\n{n['text'].strip()}\n")
     return "\n".join(parts)
 
@@ -1132,6 +1135,38 @@ def add_note(ref: str, text: str, source: str | None = None) -> dict:
     with connect() as c:
         row = _resolve(c, ref)
         _add_note(c, row["id"], text, source)
+        return _dicts(c, [row])[0]
+
+
+def _find_note(conn, task_id: int, note_id: int):
+    note = conn.execute(
+        "SELECT id, text FROM notes WHERE id = ? AND task_id = ?", (note_id, task_id)
+    ).fetchone()
+    if not note:
+        raise NotFound(f"No note #{note_id} on that task")
+    return note
+
+
+def update_note(ref: str, note_id: int, text: str, source: str | None = None) -> dict:
+    text = (text or "").strip()
+    if not text:
+        raise ToledoError("note text is required")
+    with connect() as c:
+        row = _resolve(c, ref)
+        note = _find_note(c, row["id"], note_id)
+        c.execute("UPDATE notes SET text = ? WHERE id = ?", (text, note["id"]))
+        _log_task(c, row["id"], "note_edited", note_id=note["id"], old_text=note["text"],
+                  source=source)
+        return _dicts(c, [row])[0]
+
+
+def delete_note(ref: str, note_id: int, source: str | None = None) -> dict:
+    with connect() as c:
+        row = _resolve(c, ref)
+        note = _find_note(c, row["id"], note_id)
+        c.execute("DELETE FROM notes WHERE id = ?", (note["id"],))
+        _log_task(c, row["id"], "note_deleted", note_id=note["id"], old_text=note["text"],
+                  source=source)
         return _dicts(c, [row])[0]
 
 
