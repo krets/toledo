@@ -59,6 +59,13 @@ def one_line(s, n=200):
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
+def clean_description(text):
+    """Calendar description minus URLs and divider lines (Teams/Zoom invites are mostly boilerplate)."""
+    text = re.sub(r"(?:https?://|www\.)\S+", " ", text or "")
+    text = re.sub(r"[_\-=*~]{3,}", " ", text)
+    return " ".join(text.split())
+
+
 # ---------- sections ----------
 
 def calendar_section(data, status, tz):
@@ -83,8 +90,9 @@ def calendar_section(data, status, tz):
             if e["location"]:
                 row += f" — {one_line(e['location'], 80)}"
             lines.append(row)
-            if e["description"]:
-                lines.append(f"  - {one_line(e['description'])}")
+            desc = "" if e["all_day"] else clean_description(e["description"])
+            if len(desc) > 3:
+                lines.append(f"  - {one_line(desc)}")
         lines.append("")
         day += timedelta(days=1)
     return lines
