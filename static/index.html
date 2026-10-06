@@ -53,6 +53,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   font-size:20px;font-weight:700;color:var(--accent-text);letter-spacing:-.2px;
   user-select:none;cursor:pointer;
 }
+#topbar-tabs{flex:1;display:flex;gap:16px;height:100%;align-items:center}
+.tb-tab{
+  background:none;border:none;cursor:pointer;font-family:inherit;
+  font-size:15px;font-weight:600;color:var(--muted);padding:0;letter-spacing:-.1px;
+}
+.tb-tab.active{color:var(--accent-text)}
 #ham-btn{
   background:none;border:none;color:var(--text);cursor:pointer;
   padding:7px;border-radius:6px;flex-shrink:0;transition:background .15s;
@@ -324,7 +330,24 @@ body.panel-open #fab{right:436px}
 .md a{color:var(--accent);text-decoration:none}
 .md a:hover{text-decoration:underline}
 .md hr{border:none;border-top:1px solid var(--border);margin:10px 0}
+.md table{border-collapse:collapse;width:100%;margin-bottom:10px;font-size:13px}
+.md th,.md td{border:1px solid var(--border);padding:5px 8px;text-align:left}
+.md th{background:var(--surface2);font-weight:600}
 .md-empty{font-size:14px;color:var(--muted);font-style:italic}
+
+/* ── Brief view ── */
+.brief-bar{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;
+  border-bottom:1px solid var(--border);position:sticky;top:0;z-index:9;background:var(--bg);
+}
+.brief-tabs{display:flex;gap:7px}
+.brief-actions{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.brief-status{padding:8px 14px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--border)}
+.brief-render{padding:12px 14px}
+.brief-md-raw{
+  margin:0;padding:14px;font-size:12.5px;line-height:1.55;white-space:pre-wrap;
+  word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--text);
+}
 .sub-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
 .sub-item:last-child{border-bottom:none}
 .sub-check{
@@ -476,7 +499,10 @@ body.panel-open #fab{right:436px}
 <div id="topbar">
   <button class="back-btn" id="back-btn" onclick="App.goHome()" style="display:none">‹</button>
   <img src="/static/icon-192.png" class="brand-icon" alt="TOleDO Logo" onclick="App.openSheet('about')" title="About Toledo">
-  <h1 class="brand" onclick="App.openSheet('about')" title="About Toledo">TOleDO</h1>
+  <div id="topbar-tabs">
+    <button class="tb-tab" id="tb-tasks" onclick="App.setView('tasks')">Tasks</button>
+    <button class="tb-tab" id="tb-brief" onclick="App.setView('brief')">Brief</button>
+  </div>
   <div id="ham-wrap">
     <button id="ham-btn" onclick="App.toggleHamMenu(event)" title="Menu">
       <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
@@ -823,6 +849,7 @@ App.setView = function(v) {
   if (v === 'journal') { App.loadJournal().then(() => App.renderMain()); return; }
   if (v === 'activity') { App.loadActivity().then(() => App.renderMain()); return; }
   if (v === 'tags') { App.loadTags().then(() => App.renderMain()); return; }
+  if (v === 'brief') { App.loadBrief().then(() => App.renderMain()); return; }
   App.loadTasks().then(() => App.renderMain());
 };
 
@@ -836,10 +863,17 @@ App.renderMain = function() {
   const el = $('main');
   const fab = $('fab');
   const back = $('back-btn');
+  $('tb-tasks').classList.toggle('active', App.view === 'tasks');
+  $('tb-brief').classList.toggle('active', App.view === 'brief');
   switch (App.view) {
     case 'tasks':
       el.innerHTML = App.buildTasksView();
       fab.style.display = 'flex';
+      back.style.display = 'none';
+      break;
+    case 'brief':
+      el.innerHTML = App.buildBriefView();
+      fab.style.display = 'none';
       back.style.display = 'none';
       break;
     case 'archive':
@@ -939,6 +973,63 @@ App.sendChatMessage = async function() {
   btn.disabled = false;
   App.renderMain();
 };
+
+// ── Brief view ────────────────────────────────────────────────────────────────
+App.loadBrief = async function() {
+  try { App.brief = await api('GET', '/api/brief'); } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.setBriefTab = function(t) {
+  App.briefTab = t;
+  App.renderMain();
+};
+
+App.buildBriefView = function() {
+  if (!App.brief) return `<div class="view-header">Brief</div><div class="empty"><p>Loading…</p></div>`;
+  const b = App.brief;
+  const tab = App.briefTab || 'render';
+  const copyIcon = `<svg viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>`;
+  let status = b.running ? 'Collecting now…' : (b.last_run
+    ? `Last run ${fmtBriefTime(b.last_run.finished_at)}${b.last_run.ok === false ? ' — failed' : ''}`
+    : 'No run yet');
+  if (b.next_run && b.next_run.note) status += ` · Next run: ${esc(b.next_run.note)}`;
+  return `<div class="view-header">Brief</div>
+    <div class="brief-bar">
+      <div class="brief-tabs">
+        <button class="filter-btn${tab === 'render' ? ' active' : ''}" onclick="App.setBriefTab('render')">Render</button>
+        <button class="filter-btn${tab === 'markdown' ? ' active' : ''}" onclick="App.setBriefTab('markdown')">Markdown</button>
+      </div>
+      <div class="brief-actions">
+        ${tab === 'markdown' ? `<button class="icon-btn" title="Copy Markdown" onclick="App.copyBriefMarkdown()">${copyIcon}</button>` : ''}
+        <button class="abtn" onclick="App.runBriefNow()"${b.running ? ' disabled' : ''}>${b.running ? 'Running…' : 'Run now'}</button>
+      </div>
+    </div>
+    <div class="brief-status">${esc(status)}</div>
+    ${tab === 'render'
+      ? `<div class="md brief-render">${b.markdown ? mdToHtml(b.markdown) : '<p class="md-empty">No brief generated yet.</p>'}</div>`
+      : `<pre class="brief-md-raw">${esc(b.markdown || '')}</pre>`}`;
+};
+
+App.copyBriefMarkdown = async function() {
+  try {
+    await navigator.clipboard.writeText(App.brief?.markdown || '');
+    App.toast('✓ Copied Markdown to clipboard');
+  } catch(e) { App.toast('✗ Failed to copy: ' + e.message); }
+};
+
+App.runBriefNow = async function() {
+  try {
+    const res = await api('POST', '/api/brief/run');
+    App.toast(res.started ? '✓ Brief run started' : 'A run is already in progress');
+    setTimeout(() => App.loadBrief().then(() => { if (App.view === 'brief') App.renderMain(); }), 1500);
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+function fmtBriefTime(iso) {
+  if (!iso) return 'unknown';
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
 
 // ── Tasks view ────────────────────────────────────────────────────────────────
 App.buildTasksView = function() {
@@ -1361,9 +1452,17 @@ App.renameTag = async function(tag) {
 // ── Settings view ─────────────────────────────────────────────────────────────
 App.loadSettings = async function() {
   try {
-    App.settings = await api('GET', '/api/settings');
+    const [settings, kw, cal] = await Promise.all([
+      api('GET', '/api/settings'),
+      api('GET', '/api/brief/keywords'),
+      api('GET', '/api/brief/calendars'),
+    ]);
+    App.settings = settings;
     App.settingsForm = { ...App.settings.llm, token_limit: App.settings.chat.token_limit };
     App.settingsModels = [];
+    App.briefKeywordsText = kw.keywords.join('\n');
+    App.briefCalendars = cal.calendars;
+    App.briefCalForm = { label: '', url: '' };
   } catch(e) { App.toast('✗ ' + e.message); }
   App.renderMain();
 };
@@ -1414,6 +1513,31 @@ App.buildSettingsView = function() {
         <button class="btn btn-p" onclick="App.saveSettings()">Save</button>
       </div>
       ${App.settingsTest ? `<div class="settings-test ${App.settingsTest.ok ? 'ok' : 'err'}">${esc(App.settingsTest.text)}</div>` : ''}
+
+      <div class="settings-section" style="margin-top:22px">Morning Brief</div>
+      <div class="fg"><label>Keywords (one per line) — matched against nearby tech events</label>
+        <textarea rows="6" oninput="App.briefKeywordsText=this.value">${esc(App.briefKeywordsText || '')}</textarea>
+      </div>
+      <div class="btn-row"><button class="btn btn-s" onclick="App.saveBriefKeywords()">Save Keywords</button></div>
+
+      <div class="fg" style="margin-top:18px"><label>Calendars</label>
+        ${(App.briefCalendars || []).map(c => `
+          <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
+            <label style="display:flex;align-items:center;gap:7px;flex:1;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text);margin:0">
+              <input type="checkbox" style="width:auto"${c.enabled ? ' checked' : ''} onchange="App.toggleBriefCalendar('${esc(c.label)}', this.checked)">
+              ${esc(c.label)}${c.has_url ? '' : ' <span class="settings-hint" style="display:inline">(no URL set)</span>'}
+            </label>
+            <button class="icon-btn" title="Remove calendar" onclick="App.deleteBriefCalendar('${esc(c.label)}')">✕</button>
+          </div>`).join('') || '<div class="settings-hint">No calendars yet.</div>'}
+      </div>
+      <div class="fg"><label>Add a calendar (private iCal feed URL)</label>
+        <div class="frow">
+          <input type="text" placeholder="label" value="${esc(App.briefCalForm?.label || '')}" oninput="App.briefCalForm.label=this.value">
+          <input type="url" placeholder="https://…/basic.ics" value="${esc(App.briefCalForm?.url || '')}" oninput="App.briefCalForm.url=this.value">
+        </div>
+        <div class="settings-hint">The URL is treated as a secret and never shown back once saved — add a new one to replace it.</div>
+      </div>
+      <div class="btn-row"><button class="btn btn-s" onclick="App.addBriefCalendar()">Save Calendar</button></div>
     </div>`;
 };
 
@@ -1427,6 +1551,45 @@ App.changeSettingsProvider = function(id) {
   if (id === App.settings.llm.provider) f.base_url = App.settings.llm.base_url;
   App.settingsModels = [];
   App.settingsTest = null;
+  App.renderMain();
+};
+
+App.saveBriefKeywords = async function() {
+  const kws = (App.briefKeywordsText || '').split('\n').map(s => s.trim()).filter(Boolean);
+  try {
+    const res = await api('PUT', '/api/brief/keywords', { keywords: kws });
+    App.briefKeywordsText = res.keywords.join('\n');
+    App.toast(`✓ Saved ${res.keywords.length} keyword(s)`);
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.toggleBriefCalendar = async function(label, enabled) {
+  try {
+    await api('PUT', '/api/brief/calendars', { label, enabled });
+    App.briefCalendars = (await api('GET', '/api/brief/calendars')).calendars;
+  } catch(e) { App.toast('✗ ' + e.message); }
+  App.renderMain();
+};
+
+App.deleteBriefCalendar = async function(label) {
+  try {
+    await api('DELETE', '/api/brief/calendars/' + encodeURIComponent(label));
+    App.briefCalendars = App.briefCalendars.filter(c => c.label !== label);
+    App.toast('✓ Calendar removed');
+  } catch(e) { App.toast('✗ ' + e.message); }
+  App.renderMain();
+};
+
+App.addBriefCalendar = async function() {
+  const f = App.briefCalForm || {};
+  const label = (f.label || '').trim(), url = (f.url || '').trim();
+  if (!label || !url) { App.toast('✗ Label and URL are both required'); return; }
+  try {
+    await api('PUT', '/api/brief/calendars', { label, url, enabled: true });
+    App.briefCalendars = (await api('GET', '/api/brief/calendars')).calendars;
+    App.briefCalForm = { label: '', url: '' };
+    App.toast('✓ Calendar saved');
+  } catch(e) { App.toast('✗ ' + e.message); }
   App.renderMain();
 };
 
@@ -2548,15 +2711,36 @@ function renderDesc(src) {
 function mdToHtml(src) {
   if (!src) return '';
   const lines = src.split('\n');
-  let html = '', inUl = false, inPre = false;
+  let html = '', inUl = false, inPre = false, table = null;
   const flushUl = () => { if (inUl) { html += '</ul>'; inUl = false; } };
+  const isTableRow = line => /^\s*\|.*\|\s*$/.test(line.trim());
+  const isSepRow = line => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line.trim());
+  const splitRow = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  const flushTable = () => {
+    if (!table) return;
+    const [head, ...body] = table;
+    html += '<table><thead><tr>' + head.map(c => `<th>${inline(c)}</th>`).join('') + '</tr></thead>';
+    if (body.length) {
+      html += '<tbody>' + body.map(r => '<tr>' + r.map(c => `<td>${inline(c)}</td>`).join('') + '</tr>').join('') + '</tbody>';
+    }
+    html += '</table>';
+    table = null;
+  };
   lines.forEach(line => {
     if (line.startsWith('```')) {
+      flushTable();
       if (inPre) { html += '</pre>'; inPre = false; }
       else { flushUl(); html += '<pre>'; inPre = true; }
       return;
     }
     if (inPre) { html += esc(line) + '\n'; return; }
+    if (isTableRow(line)) {
+      if (table && table.length === 1 && isSepRow(line)) return; // separator row right after the header
+      flushUl();
+      (table = table || []).push(splitRow(line));
+      return;
+    }
+    flushTable();
     if (/^### /.test(line)) { flushUl(); html += `<h3>${inline(line.slice(4))}</h3>`; return; }
     if (/^## /.test(line))  { flushUl(); html += `<h2>${inline(line.slice(3))}</h2>`; return; }
     if (/^# /.test(line))   { flushUl(); html += `<h1>${inline(line.slice(2))}</h1>`; return; }
@@ -2571,6 +2755,7 @@ function mdToHtml(src) {
     html += `<p>${inline(line)}</p>`;
   });
   flushUl();
+  flushTable();
   return html;
 }
 

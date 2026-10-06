@@ -3,16 +3,43 @@
 
 import hashlib
 import json
+import os
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, make_response, request, send_from_directory
+from flask import Flask, Response, jsonify, make_response, request, send_from_directory
 
+import brief_collect
+import brief_gcal
+import brief_scheduler
+import brief_state
 import toledo_db as db
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 db.set_default_source("web")
 STARTED = datetime.now().isoformat(timespec="seconds")
+
+# ── Morning brief ─────────────────────────────────────────────────────────────
+# Vendored from the standalone morning-brief project (github.com/krets/morning). State lives
+# alongside Toledo's own database in the shared ~/.toledo volume. Only the real server process
+# (the `if __name__ == "__main__":` block below) starts the Scheduler thread — toledo_mcp.py
+# shares this same data but only reads it, so the two containers don't both run it daily.
+BRIEF_DB_PATH = str(db.TOLEDO_HOME / "brief.db")
+BRIEF_DATA_DIR = db.TOLEDO_HOME / "brief"
+BRIEF_DATA_DIR.mkdir(parents=True, exist_ok=True)
+BRIEF_TZ_NAME = os.environ.get("TIMEZONE", "Europe/Berlin")
+BRIEF_TZ = ZoneInfo(BRIEF_TZ_NAME)
+BRIEF_EVENT_DAYS = int(os.environ.get("EVENT_DAYS", "90"))
+BRIEF_SCHEDULE_SPEC = os.environ.get("SCHEDULE_WINDOW", "02:00-06:00")
+
+_brief_conn = brief_state.connect(BRIEF_DB_PATH)
+brief_state.mark_interrupted(_brief_conn)
+brief_state.seed(_brief_conn, brief_collect.DEFAULT_KEYWORDS, brief_gcal.HOLIDAYS)
+_brief_conn.close()
+
+brief_runner = brief_scheduler.Runner(str(BRIEF_DATA_DIR), BRIEF_DB_PATH, BRIEF_TZ_NAME, BRIEF_EVENT_DAYS)
+brief_schedule = brief_scheduler.Schedule(BRIEF_SCHEDULE_SPEC, BRIEF_TZ)
 
 RELEASE = db.release_version()
 COMMIT = RELEASE["commit"]
@@ -1056,6 +1083,151 @@ INSTRUCTIONS:
         return jsonify({"error": str(e)}), 500
 
 
+# ── Morning brief ─────────────────────────────────────────────────────────────
+
+def _read_brief_context():
+    try:
+        with open(brief_runner.context_path, encoding="utf-8") as fh:
+            return fh.read(), os.path.getmtime(brief_runner.context_path)
+    except FileNotFoundError:
+        return None, None
+
+
+def _load_brief_events(conn):
+    """Events from the last collection with their state, in stable date order."""
+    rows = []
+    events_path = os.path.join(brief_runner.raw_dir, "events.jsonl")
+    if os.path.exists(events_path):
+        with open(events_path, encoding="utf-8") as fh:
+            rows = [json.loads(l) for l in fh if l.strip()]
+    return sorted(brief_state.annotate(conn, rows), key=lambda e: (e["start"], e["source_event_id"]))
+
+
+@app.route("/brief.md")
+def brief_markdown():
+    text, _ = _read_brief_context()
+    if text is None:
+        return Response("No brief generated yet.\n", mimetype="text/markdown"), 503
+    return Response(text, headers={"Content-Type": "text/markdown; charset=utf-8"})
+
+
+@app.route("/api/brief", methods=["GET"])
+def get_brief():
+    text, mtime = _read_brief_context()
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        last_success = brief_state.last_success_date(c, BRIEF_TZ)
+        last = (brief_state.last_runs(c, 1) or [None])[0]
+        next_at, next_note = brief_schedule.describe(c, datetime.now(BRIEF_TZ), last_success)
+    finally:
+        c.close()
+    return jsonify({
+        "markdown": text or "",
+        "updated": None if mtime is None else datetime.fromtimestamp(mtime, BRIEF_TZ).isoformat(timespec="minutes"),
+        "running": brief_runner.running,
+        "next_run": {"at": next_at.isoformat(timespec="minutes") if next_at else None, "note": next_note},
+        "last_run": None if last is None else {
+            "id": last["id"], "trigger": last["trigger"], "started_at": last["started_at"],
+            "finished_at": last["finished_at"], "seconds": last["seconds"],
+            "ok": None if last["finished_at"] is None else bool(last["ok"]),
+        },
+    })
+
+
+@app.route("/api/brief/run", methods=["POST"])
+def run_brief_now():
+    return jsonify({"started": brief_runner.start("manual")})
+
+
+@app.route("/api/brief/events", methods=["GET"])
+def brief_events():
+    status = request.args.get("status", "all")
+    if status != "all" and status not in brief_state.STATUSES:
+        return jsonify({"error": f"status must be all or one of {list(brief_state.STATUSES)}"}), 400
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        evs = [e for e in _load_brief_events(c) if status in ("all", e["_status"])]
+    finally:
+        c.close()
+    return jsonify({"count": len(evs), "events": [
+        {"id": e["source_event_id"], "title": e["title"], "start": e["start"], "url": e["url"],
+         "source": e["source"], "status": e["_status"], "updated": e["_updated"]} for e in evs]})
+
+
+@app.route("/api/brief/events/status", methods=["POST"])
+def brief_event_status():
+    data = request.json or {}
+    ids, status = data.get("ids"), data.get("status")
+    if (status not in brief_state.STATUSES or not isinstance(ids, list)
+            or not all(isinstance(i, str) for i in ids) or len(ids) > 2000):
+        return jsonify({"error": 'send JSON {"ids": ["meetup:123", ...], "status": "active|dismissed|muted"}'}), 400
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        updated, unknown = brief_state.set_statuses(c, ids, status)
+    finally:
+        c.close()
+    brief_runner.rerender()
+    return jsonify({"status": status, "updated": updated, "unknown": unknown})
+
+
+@app.route("/api/brief/keywords", methods=["GET"])
+def get_brief_keywords():
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        return jsonify({"keywords": brief_state.get_keywords(c)})
+    finally:
+        c.close()
+
+
+@app.route("/api/brief/keywords", methods=["PUT"])
+def put_brief_keywords():
+    data = request.json or {}
+    if not isinstance(data.get("keywords"), list):
+        return jsonify({"error": "keywords must be a list of strings"}), 400
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        clean = brief_state.set_keywords(c, data["keywords"])
+    finally:
+        c.close()
+    return jsonify({"keywords": clean})
+
+
+@app.route("/api/brief/calendars", methods=["GET"])
+def get_brief_calendars():
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        cals = brief_state.get_calendars(c)
+    finally:
+        c.close()
+    # the URL is a secret (often a private iCal feed); never echo it back in full
+    return jsonify({"calendars": [{"label": c["label"], "enabled": bool(c["enabled"]), "has_url": bool(c["url"])}
+                                   for c in cals]})
+
+
+@app.route("/api/brief/calendars", methods=["PUT"])
+def put_brief_calendar():
+    data = request.json or {}
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        label = brief_state.upsert_calendar(c, data.get("label", ""), (data.get("url") or "").strip() or None,
+                                             enabled=data.get("enabled"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    finally:
+        c.close()
+    return jsonify({"label": label})
+
+
+@app.route("/api/brief/calendars/<label>", methods=["DELETE"])
+def delete_brief_calendar(label):
+    c = brief_state.connect(BRIEF_DB_PATH)
+    try:
+        brief_state.delete_calendar(c, label)
+    finally:
+        c.close()
+    return jsonify({"deleted": True})
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1064,5 +1236,6 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
+    brief_scheduler.Scheduler(brief_runner, brief_schedule).start()
     print(f"Toledo server running on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

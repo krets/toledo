@@ -26,6 +26,18 @@ import toledo_db as db
 
 RELEASE = db.release_version()
 
+# Morning brief: the scheduler/collectors live in toledo_server.py (brief_scheduler.py); this
+# process only reads their output from the shared ~/.toledo/brief/context.md.
+BRIEF_CONTEXT_PATH = db.TOLEDO_HOME / "brief" / "context.md"
+
+
+def read_brief() -> str:
+    try:
+        return BRIEF_CONTEXT_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "No brief generated yet."
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def pri_label(n: int) -> str:
@@ -538,6 +550,16 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Get a summary of all tasks grouped by state and project. "
                 "Good for a quick overview of what's on the plate."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="get_brief",
+            description=(
+                "Fetch the latest morning brief as Markdown: calendar (including German/UK/US "
+                "public holidays), weather, and nearby tech events. Generated once a day by a "
+                "background job; this just reads the last run's output. Already included in "
+                "the morning_planning prompt, so call this only when you need it outside that flow."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
@@ -1126,6 +1148,10 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             lines.append("")
         return ok("\n".join(lines))
 
+    # ── get_brief ─────────────────────────────────────────────────────────────
+    if name == "get_brief":
+        return ok(read_brief())
+
     # ── list_projects ─────────────────────────────────────────────────────────
     if name == "list_projects":
         projects = db.list_projects()
@@ -1287,6 +1313,12 @@ async def list_resources() -> list[types.Resource]:
             description="The ten newest journal entries (id, date, title, excerpt)",
             mimeType="text/plain",
         ),
+        types.Resource(
+            uri="toledo://brief",
+            name="Morning Brief",
+            description="Latest morning brief (calendar, weather, nearby tech events) as Markdown",
+            mimeType="text/markdown",
+        ),
     ]
 
 
@@ -1318,6 +1350,10 @@ async def read_resource(uri: types.AnyUrl) -> str:
 
     if uri_str == "toledo://journal/recent":
         result = await _dispatch("list_journal", {"limit": 10})
+        return result[0].text
+
+    if uri_str == "toledo://brief":
+        result = await _dispatch("get_brief", {})
         return result[0].text
 
     raise ValueError(f"Unknown resource: {uri_str}")
@@ -1536,6 +1572,7 @@ async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPr
     text = prompts[name] + await _snapshot("active")
     if name == "morning_planning":
         text += _latest_journal_section()
+        text += _latest_brief_section()
     return types.GetPromptResult(messages=[_prompt_message(text)])
 
 
@@ -1546,6 +1583,12 @@ def _latest_journal_section() -> str:
     except db.NotFound:
         return "\n\n---\n# Latest journal entry\nNone saved yet.\n"
     return f"\n\n---\n# Latest journal entry\n{fmt_journal_detail(entry, include_raw=False)}\n"
+
+
+def _latest_brief_section() -> str:
+    """Latest morning brief (calendar/weather/events), appended for morning_planning so a
+    claude.ai session doesn't need a separate get_brief call to see it."""
+    return f"\n\n---\n# Morning brief\n{read_brief()}\n"
 
 
 async def _snapshot(state: str) -> str:

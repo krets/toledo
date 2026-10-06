@@ -13,6 +13,12 @@ services:
     volumes:
       - toledo-data:/home/toledo/.toledo
     restart: always
+    environment:
+      # Morning brief scheduler (only toledo-server runs it; toledo-mcp just reads its output)
+      TIMEZONE: ${TIMEZONE:-Europe/Berlin}
+      SCHEDULE_WINDOW: ${SCHEDULE_WINDOW:-02:00-06:00}
+      EVENT_DAYS: ${EVENT_DAYS:-90}
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-http://underlord.krets.com:9090}
     command: python toledo_server.py --host 0.0.0.0 --port 4321
 
   toledo-mcp:

@@ -34,7 +34,9 @@ self.addEventListener('fetch', e => {
     // the cached copy is only for offline use.
     e.respondWith(
       fetch(e.request).then(r => {
-        if (r.ok && r.type === 'basic') {
+        // Only the SPA shell ('/') is cached for offline use; other navigable
+        // routes (e.g. /brief.md) must not overwrite that cache entry.
+        if (r.ok && r.type === 'basic' && url.pathname === '/') {
           const copy = r.clone();
           caches.open(CACHE).then(c => c.put('/', copy));
         }

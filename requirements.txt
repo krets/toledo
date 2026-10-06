@@ -5,3 +5,9 @@ starlette
 uvloop
 litellm
 openai
+
+# Morning brief (vendored from github.com/krets/morning)
+requests
+icalendar
+recurring-ical-events
+tzdata

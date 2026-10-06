@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY toledo toledo_db.py toledo_mcp.py toledo_server.py ./
+COPY brief_collect.py brief_gcal.py brief_weather.py brief_state.py brief_build.py brief_scheduler.py ./
 COPY static/ static/
 
 # Ensure toledo script is executable
