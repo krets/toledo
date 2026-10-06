@@ -93,10 +93,12 @@ def fmt(v, unit="", nd=1):
     return "—" if v is None else f"{v:.{nd}f}{unit}"
 
 
-def weather_section(data, status):
+def weather_section(data, status, line=None, full=False):
     lines = [f"## Weather — {data['location'] if data else 'Berlin'}", ""]
     if data is None or "previous_24h" not in data or "next_24h" not in data:
         return lines + [f"Unavailable or partial: {status}", ""]
+    if not full:
+        return lines + [line or weather_fallback_line(data), ""]
     prev, nxt = data["previous_24h"]["summary"], data["next_24h"]["summary"]
     rows = [  # label, stat group, stat, decimals
         ("Temperature low (°C)", "temp_c", "min", 1),
@@ -123,6 +125,45 @@ def weather_section(data, status):
             lines.append(f"| {label} | {fmt(h.get('temp_c'))} | {fmt(h.get('precip_mm'))} | "
                          f"{fmt(h.get('cloud_pct'), nd=0)} | {fmt(h.get('wind_speed_ms'))} |")
     return lines + [""]
+
+
+def weather_fallback_line(data):
+    """Deterministic one-liner, used when no LLM is configured or the call fails."""
+    prev, nxt = data["previous_24h"]["summary"], data["next_24h"]["summary"]
+    t, p = nxt["temp_c"], nxt["precip_mm"]["sum"]
+    d_avg = nxt["temp_c"]["avg"] - prev["temp_c"]["avg"]
+    d_rain = p - prev["precip_mm"]["sum"]
+    return (f"Next 24 h: {fmt(t['min'], nd=0)}–{fmt(t['max'], nd=0)} °C, {fmt(p, nd=1)} mm rain, "
+            f"wind up to {fmt(nxt['wind_speed_ms']['max'], nd=0)} m/s; vs the previous 24 h "
+            f"{d_avg:+.1f} °C avg, {d_rain:+.1f} mm rain.")
+
+
+WEATHER_PROMPT = (
+    "Write ONE plain-text sentence (max 30 words) telling someone planning their day how today's weather "
+    "in {location} compares to yesterday's. Interpret significant day-over-day changes (similar to yesterday, "
+    "turning rainy, sun coming out, much colder...) and mention timing if rain or wind matters. No markdown, "
+    "no preamble.\n\nPrevious 24 h observed vs next 24 h forecast:\n{data}"
+)
+
+
+def weather_line(data, llm):
+    """One-sentence LLM distillation of the weather; None when unavailable (caller falls back)."""
+    if not llm or not llm.get("model") or data is None or "previous_24h" not in data or "next_24h" not in data:
+        return None
+    rain_hours = [datetime.fromisoformat(h["time"]).strftime("%H:%M")
+                  for h in data["next_24h"]["hourly"] if (h.get("precip_mm") or 0) >= 0.2]
+    payload = json.dumps({"previous_24h": data["previous_24h"]["summary"],
+                          "next_24h": data["next_24h"]["summary"],
+                          "next_24h_hours_with_rain": rain_hours})
+    try:
+        from litellm import completion
+        resp = completion(model=llm["model"], api_key=llm.get("api_key"), api_base=llm.get("base_url"),
+                          messages=[{"role": "user", "content": WEATHER_PROMPT.format(
+                              location=data["location"], data=payload)}], timeout=60)
+        return one_line(resp.choices[0].message.content or "", 300) or None
+    except Exception as exc:
+        print(f"weather: LLM summary failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
 
 
 def events_section(rows, status, days):
@@ -173,6 +214,9 @@ def main(argv=None):
     p.add_argument("--skip-events", action="store_true", help="skip the slow events scrape")
     p.add_argument("--skip-weather", action="store_true")
     p.add_argument("--skip-calendar", action="store_true")
+    p.add_argument("--full-weather", action="store_true", help="render the full weather tables, not the one-line summary")
+    p.add_argument("--llm-file", help="JSON {model, api_key, base_url} for the weather one-liner "
+                                      "(without it the line is built deterministically)")
     p.add_argument("--db", help="SQLite state file: keywords and calendar feeds come from it, and events are "
                                 "synced to it and filtered by mute/dismiss status")
     p.add_argument("--run-id", type=int, help="with --db: record each source's result against this run")
@@ -235,6 +279,17 @@ def main(argv=None):
         for f in tmp_files:
             os.remove(f)
 
+    line_path = os.path.join(args.raw_dir, "weather_line.txt")
+    if not args.skip_weather and not args.from_raw:  # --from-raw reuses the saved line instead of re-calling the LLM
+        llm = load_json(args.llm_file) if args.llm_file else None
+        line = weather_line(sections_data.get("weather"), llm)
+        if line:
+            with open(line_path, "w", encoding="utf-8") as fh:
+                fh.write(line)
+        elif os.path.exists(line_path):
+            os.remove(line_path)
+    saved_line = open(line_path, encoding="utf-8").read().strip() if os.path.exists(line_path) else None
+
     if conn and args.run_id and not args.from_raw:
         state.record_sources(conn, args.run_id, statuses)
 
@@ -249,7 +304,7 @@ def main(argv=None):
     if not args.skip_calendar:
         md += calendar_section(sections_data["calendar"], errors.get("calendar"), tz)
     if not args.skip_weather:
-        md += weather_section(sections_data["weather"], errors.get("weather"))
+        md += weather_section(sections_data["weather"], errors.get("weather"), saved_line, args.full_weather)
     if not args.skip_events:
         md += events_section(sections_data["events"], errors.get("events"), args.event_days)
     md += ["## Data sources", "", "Re-rendered from saved raw output; collector status not available.", ""]         if args.from_raw else status_section(statuses)

@@ -38,7 +38,8 @@ brief_state.mark_interrupted(_brief_conn)
 brief_state.seed(_brief_conn, brief_collect.DEFAULT_KEYWORDS, brief_gcal.HOLIDAYS)
 _brief_conn.close()
 
-brief_runner = brief_scheduler.Runner(str(BRIEF_DATA_DIR), BRIEF_DB_PATH, BRIEF_TZ_NAME, BRIEF_EVENT_DAYS)
+brief_runner = brief_scheduler.Runner(str(BRIEF_DATA_DIR), BRIEF_DB_PATH, BRIEF_TZ_NAME, BRIEF_EVENT_DAYS,
+                                      llm_resolver=lambda: resolve_llm(db.load_config().get("llm", {})))
 brief_schedule = brief_scheduler.Schedule(BRIEF_SCHEDULE_SPEC, BRIEF_TZ)
 
 RELEASE = db.release_version()
