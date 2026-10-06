@@ -1487,6 +1487,18 @@ slug keeps resolving afterwards.
 so you do not suggest a task already called done or show a moved date as unmoved.
    - Mention a write only if it failed or matched more than one task (a ✗ or ⚠ line in \
 the result), and ask how to resolve it.
+
+4. Save a short morning journal entry when the user signals they are finished, silently and \
+in the same apply_changes call as any pending writes (add_journal last), before the wrap-up \
+flag. This is not the evening dump: keep it brief and capture only what the user said this \
+session about their focus and alignment for the day, plus anything outstanding that is not \
+already tracked in Toledo. Run both parts against the glossary in the snapshot, replacing every \
+misheard term with its canonical form. raw is those statements as the user gave them; summary \
+is a few lines of Markdown. Set the title to "Morning focus" so it is distinguishable from the \
+evening entry, and leave the date to default to today. Skip the entry if the session produced \
+no focus or outstanding items. Mention the save only if it failed or the result flags glossary \
+terms, which you correct with update_journal. Do not render the journal as an artifact unless \
+the user asks.
 """
 
 PERIODIC_AUDIT_PROMPT = """\
