@@ -1441,6 +1441,10 @@ below; if it is not, fetch it. Treat the snapshot header's date and time as the 
 and compare it against the entry's submitted timestamp to judge how recent it is. Hold the \
 entry and the snapshot as silent context for the whole session.
 
+   The snapshot may end with a morning brief. Its calendar covers the next few days and \
+its weather is one line; both are silent context like the rest. Its tech events/meetups are \
+low priority: mention one only if the user asks or there is genuinely nothing else to discuss.
+
    Your entire opening message is "Ready." Then wait for the user to speak. No recap, no \
 brief, no question, no agenda, no menu.
 

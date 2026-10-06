@@ -166,25 +166,25 @@ def weather_line(data, llm):
         return None
 
 
-def events_section(rows, status, days):
-    lines = [f"## Tech events near Berlin (next {days} days)", ""]
+BRIEF_EVENT_LIMIT = 8
+
+
+def events_section(rows, status, days, limit=BRIEF_EVENT_LIMIT):
+    """Short, low-priority list: only the nearest `limit` events, one line each (no ids or match reasons)."""
+    lines = ["## Tech events near Berlin (low priority)", ""]
     if rows is None:
         return lines + [f"Unavailable: {status}", ""]
     if not rows:
         return lines + ["No matching events found.", ""]
-    by_day = defaultdict(list)
-    for e in rows:
-        by_day[datetime.fromisoformat(e["start"]).date()].append(e)
-    for day in sorted(by_day):
-        lines.append(f"### {fmt_day(day)}")
-        for e in by_day[day]:
-            loc = e["location"]
-            where = loc["name"] or loc["address"] or loc["city"] or ""
-            lines.append(f"- **{fmt_time(e['start'])}** [{e['title']}]({e['url']}) _({e['source']})_"
-                         + (" **[updated]**" if e.get("_updated") else "") + (f" — {where}" if where else ""))
-            lines.append(f"  - id: `{e['source_event_id']}` · matched: {' '.join(f'`{k}`' for k in e['matched_queries'])}")
-        lines.append("")
-    return lines
+    for e in rows[:limit]:
+        loc = e["location"]
+        where = loc["name"] or loc["address"] or loc["city"] or ""
+        when = datetime.fromisoformat(e["start"])
+        lines.append(f"- **{when.strftime('%a %b %d').replace(' 0', ' ')} {when.strftime('%H:%M')}** "
+                     f"[{e['title']}]({e['url']})" + (f" — {where}" if where else ""))
+    if len(rows) > limit:
+        lines.append(f"- _{len(rows) - limit} more within {days} days not shown._")
+    return lines + [""]
 
 
 def status_section(statuses):
