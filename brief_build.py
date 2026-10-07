@@ -224,21 +224,35 @@ def drop_accepted(rows, calendar):
     return keep, len(rows) - len(keep)
 
 
+def in_calendar_window(ev, calendar):
+    """The event starts inside the span the calendar was fetched for, so absence of a match means something."""
+    start = datetime.fromisoformat(ev["start"])
+    return datetime.fromisoformat(calendar["window_start"]) <= start < datetime.fromisoformat(calendar["window_end"])
+
+
+def trim_calendar(calendar, days):
+    """The calendar data cut down to its first `days` days."""
+    start = datetime.fromisoformat(calendar["window_start"])
+    end = start + timedelta(days=days)
+    return dict(calendar, window_end=end.isoformat(),
+                events=[e for e in calendar["events"] if datetime.fromisoformat(e["start"]) < end])
+
+
 def events_section(rows, status, days, limit=BRIEF_EVENT_LIMIT):
-    """Short, low-priority list: only the nearest `limit` events, one line each (no ids or match reasons)."""
+    """Short, low-priority list: the nearest `limit` events as date, title and internal id.
+    No URL or venue: get_event(id) fetches those when they are wanted."""
     lines = ["## Tech events near Berlin (low priority)", ""]
     if rows is None:
         return lines + [f"Unavailable: {status}", ""]
     if not rows:
         return lines + ["No matching events found.", ""]
     for e in rows[:limit]:
-        loc = e["location"]
-        where = loc["name"] or loc["address"] or loc["city"] or ""
         when = datetime.fromisoformat(e["start"])
-        lines.append(f"- **{when.strftime('%a %b %d').replace(' 0', ' ')} {when.strftime('%H:%M')}** "
-                     f"[{e['title']}]({e['url']})" + (f" — {where}" if where else ""))
+        ref = f" · {state.short_id(e['_id'])}" if e.get("_id") else ""
+        lines.append(f"- {when.strftime('%a %b %d').replace(' 0', ' ')} {e['title']}{ref}")
     if len(rows) > limit:
-        lines.append(f"- _{len(rows) - limit} more within {days} days not shown._")
+        lines.append(f"- _{len(rows) - limit} more within {days} days; list_events shows them._")
+    lines.append("- _get_event(id) gives the link and details; dismiss_events or mute_events hides them._")
     return lines + [""]
 
 
@@ -315,7 +329,7 @@ def main(argv=None):
     try:
         if not args.skip_calendar:
             path = os.path.join(args.raw_dir, "calendar.json")
-            cli = ["--days", str(args.calendar_days), "--timezone", args.timezone, "--out", path]
+            cli = ["--days", str(max(args.calendar_days, args.event_days)), "--timezone", args.timezone, "--out", path]
             if conn and not args.from_raw:
                 feeds = {c["label"]: c["url"] for c in state.get_calendars(conn) if c["enabled"]}
                 cli += ["--feeds-file", temp_json(json.dumps(feeds))]
@@ -348,14 +362,23 @@ def main(argv=None):
     if conn and args.run_id and not args.from_raw:
         state.record_sources(conn, args.run_id, statuses)
 
-    if conn and sections_data.get("events") is not None:
-        if not args.from_raw:
-            state.sync_events(conn, sections_data["events"])
-        sections_data["events"] = state.visible(conn, sections_data["events"])[0]
-    if sections_data.get("events") is not None:  # signed up for outside Toledo: already on the calendar
-        sections_data["events"], on_calendar = drop_accepted(sections_data["events"], sections_data.get("calendar"))
-        if on_calendar:
-            print(f"events: {on_calendar} already on the calendar, hidden", file=sys.stderr)
+    cal_events = (sections_data.get("calendar") or {}).get("events")
+    if sections_data.get("events") is not None:
+        rows = sections_data["events"]
+        if conn and not args.from_raw:
+            state.sync_events(conn, rows)
+        if conn and cal_events is not None:  # on the calendar = signed up for, whether or not through Toledo
+            accepted = {e["source_event_id"] for e in rows if calendar_matches(e, cal_events)}
+            state.mark_accepted(conn, [e["source_event_id"] for e in rows if in_calendar_window(e, sections_data["calendar"])],
+                                accepted)
+        if conn:
+            sections_data["events"], hidden = state.visible(conn, rows)
+        else:
+            sections_data["events"], hidden = drop_accepted(rows, sections_data.get("calendar"))
+        if hidden:
+            print(f"events: {hidden} hidden (dismissed, muted or on the calendar)", file=sys.stderr)
+    if sections_data.get("calendar"):  # fetched wider than shown, for event matching
+        sections_data["calendar"] = trim_calendar(sections_data["calendar"], args.calendar_days)
 
     now = datetime.now(tz)
     md = [f"# Morning context — {now.strftime('%A, %B %d, %Y').replace(' 0', ' ')}", "",

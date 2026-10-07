@@ -348,6 +348,15 @@ body.panel-open #fab{right:436px}
   margin:0;padding:14px;font-size:12.5px;line-height:1.55;white-space:pre-wrap;
   word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--text);
 }
+.ev-list{padding:4px 14px 14px}
+.ev-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
+.ev-row:last-child{border-bottom:none}
+.ev-main{flex:1;min-width:0}
+.ev-title{font-size:14px;color:var(--text);text-decoration:none;overflow-wrap:anywhere}
+a.ev-title:hover{text-decoration:underline}
+.ev-meta{font-size:12px;color:var(--muted);margin-top:2px}
+.ev-tag{font-size:11px;border:1px solid var(--border);border-radius:9px;padding:0 6px;margin-left:6px;color:var(--muted)}
+.ev-acts{display:flex;gap:4px;flex-shrink:0}
 .sub-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)}
 .sub-item:last-child{border-bottom:none}
 .sub-check{
@@ -983,9 +992,58 @@ App.loadBrief = async function() {
   try { App.brief = await api('GET', '/api/brief'); } catch(e) { App.toast('✗ ' + e.message); }
 };
 
-App.setBriefTab = function(t) {
+App.setBriefTab = async function(t) {
   App.briefTab = t;
+  if (t === 'events') await App.loadBriefEvents();
+  else await App.loadBrief();  // a dismissed event may have changed the rendered brief
   App.renderMain();
+};
+
+// Events tab: upcoming events with their internal ids, manageable without an MCP client.
+App.briefEventFilter = 'active';
+
+App.loadBriefEvents = async function() {
+  try {
+    const res = await api('GET', '/api/brief/events?status=all&accepted=1');
+    App.briefEvents = res.events;
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.setBriefEventFilter = function(f) {
+  App.briefEventFilter = f;
+  App.renderMain();
+};
+
+App.setBriefEventStatus = async function(id, status) {
+  try {
+    await api('POST', '/api/brief/events/status', { ids: [id], status });
+    await App.loadBriefEvents();
+    App.renderMain();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.buildBriefEvents = function() {
+  const all = App.briefEvents;
+  if (!all) return `<div class="empty"><p>Loading…</p></div>`;
+  const f = App.briefEventFilter;
+  const match = e => f === 'calendar' ? e.accepted : (!e.accepted && e.status === f);
+  const count = k => all.filter(e => k === 'calendar' ? e.accepted : (!e.accepted && e.status === k)).length;
+  const filters = [['active', 'Active'], ['dismissed', 'Dismissed'], ['muted', 'Muted'], ['calendar', 'On calendar']];
+  const evs = all.filter(match);
+  const fmtDay = iso => new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  const act = (id, status, label) => `<button class="abtn" onclick="App.setBriefEventStatus('${esc(id)}','${status}')">${label}</button>`;
+  return `<div class="brief-bar"><div class="brief-tabs">${filters.map(([k, label]) =>
+      `<button class="filter-btn${f === k ? ' active' : ''}" onclick="App.setBriefEventFilter('${k}')">${label} ${count(k)}</button>`).join('')}</div></div>
+    <div class="ev-list">${evs.length ? evs.map(e => `
+      <div class="ev-row">
+        <div class="ev-main">
+          ${e.url ? `<a class="ev-title" href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.title)}</a>` : `<span class="ev-title">${esc(e.title)}</span>`}${e.updated ? '<span class="ev-tag">updated</span>' : ''}
+          <div class="ev-meta">${esc(fmtDay(e.start))}${e.where ? ' · ' + esc(e.where) : ''} · ${esc(e.source || '')} · ${esc(e.ref)}</div>
+        </div>
+        <div class="ev-acts">${e.accepted ? '' : e.status === 'active'
+          ? act(e.ref, 'dismissed', 'Dismiss') + act(e.ref, 'muted', 'Mute')
+          : act(e.ref, 'active', 'Restore')}</div>
+      </div>`).join('') : '<p class="md-empty" style="padding:14px 0">Nothing here.</p>'}</div>`;
 };
 
 App.buildBriefView = function() {
@@ -1002,6 +1060,7 @@ App.buildBriefView = function() {
       <div class="brief-tabs">
         <button class="filter-btn${tab === 'render' ? ' active' : ''}" onclick="App.setBriefTab('render')">Render</button>
         <button class="filter-btn${tab === 'markdown' ? ' active' : ''}" onclick="App.setBriefTab('markdown')">Markdown</button>
+        <button class="filter-btn${tab === 'events' ? ' active' : ''}" onclick="App.setBriefTab('events')">Events</button>
       </div>
       <div class="brief-actions">
         ${tab === 'markdown' ? `<button class="icon-btn" title="Copy Markdown" onclick="App.copyBriefMarkdown()">${copyIcon}</button>` : ''}
@@ -1009,7 +1068,7 @@ App.buildBriefView = function() {
       </div>
     </div>
     <div class="brief-status">${esc(status)}</div>
-    ${tab === 'render'
+    ${tab === 'events' ? App.buildBriefEvents() : tab === 'render'
       ? `<div class="md brief-render">${b.markdown ? mdToHtml(b.markdown) : '<p class="md-empty">No brief generated yet.</p>'}</div>`
       : `<pre class="brief-md-raw">${esc(b.markdown || '')}</pre>`}`;
 };

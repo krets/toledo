@@ -8,6 +8,9 @@ Event semantics (keyed by source_event_id, change detected via the collector's c
   active     shown in the brief
   dismissed  hidden until the event's details change, then it comes back (active, flagged updated)
   muted      hidden for good, even if the details change
+Independently of status, an event is accepted (accepted_at set) while a calendar entry matches it.
+Accepted events leave the review list and the brief. Each event also has a small integer id,
+shown as e<id>, so agents can refer to it without carrying the platform id or URL.
 """
 import json
 import os
@@ -20,12 +23,14 @@ CREATE TABLE IF NOT EXISTS keywords (keyword TEXT PRIMARY KEY COLLATE NOCASE);
 CREATE TABLE IF NOT EXISTS calendars (
     label TEXT PRIMARY KEY, url TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS events (
-    source_event_id TEXT PRIMARY KEY,
-    title TEXT, url TEXT, start TEXT,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_event_id TEXT NOT NULL UNIQUE,
+    source TEXT, title TEXT, url TEXT, start TEXT, end_at TEXT,
+    location TEXT, description TEXT,
     content_hash TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'dismissed', 'muted')),
     first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
-    changed_at TEXT);
+    changed_at TEXT, accepted_at TEXT);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL, finished_at TEXT, trigger TEXT,
@@ -47,13 +52,29 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _legacy_events(conn):
+    """True for an events table from before events had an integer id."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    return bool(cols) and "id" not in cols
+
+
 def connect(path):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA journal_mode=WAL")
+    legacy = _legacy_events(conn)
+    if legacy:
+        conn.execute("ALTER TABLE events RENAME TO events_old")
     conn.executescript(SCHEMA)
+    if legacy:
+        with conn:
+            conn.execute("INSERT INTO events (source_event_id, title, url, start, content_hash, status,"
+                         " first_seen, last_seen, changed_at)"
+                         " SELECT source_event_id, title, url, start, content_hash, status, first_seen,"
+                         " last_seen, changed_at FROM events_old ORDER BY first_seen, source_event_id")
+            conn.execute("DROP TABLE events_old")
     if "color" not in {r["name"] for r in conn.execute("PRAGMA table_info(keywords)")}:
         with conn:
             conn.execute("ALTER TABLE keywords ADD COLUMN color INTEGER")
@@ -138,6 +159,26 @@ def delete_calendar(conn, label):
 
 # ---------- events ----------
 
+DESCRIPTION_CHARS = 4000
+
+
+def short_id(n):
+    return f"e{n}"
+
+
+def parse_ref(ref):
+    """'e42', '#e42' or '42' -> 42; None for anything else."""
+    ref = str(ref).strip().lstrip("#").lower()
+    ref = ref[1:] if ref.startswith("e") else ref
+    return int(ref) if ref.isdigit() else None
+
+
+def _details(e):
+    """The stored columns that hold what get_event shows."""
+    return (e.get("source"), e.get("end"), json.dumps(e.get("location") or {}, ensure_ascii=False),
+            (e.get("description") or "")[:DESCRIPTION_CHARS])
+
+
 def sync_events(conn, rows, now=None):
     """Record this run's events; a changed content_hash re-surfaces dismissed events."""
     now = now or now_iso()
@@ -146,50 +187,79 @@ def sync_events(conn, rows, now=None):
             old = conn.execute("SELECT content_hash, status FROM events WHERE source_event_id=?",
                                (e["source_event_id"],)).fetchone()
             if old is None:
-                conn.execute("INSERT INTO events (source_event_id, title, url, start, content_hash, first_seen, last_seen)"
-                             " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                             (e["source_event_id"], e["title"], e["url"], e["start"], e["content_hash"], now, now))
+                conn.execute("INSERT INTO events (source_event_id, title, url, start, content_hash, first_seen, last_seen,"
+                             " source, end_at, location, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (e["source_event_id"], e["title"], e["url"], e["start"], e["content_hash"], now, now,
+                              *_details(e)))
             elif old["content_hash"] != e["content_hash"]:
                 conn.execute("UPDATE events SET title=?, url=?, start=?, content_hash=?, last_seen=?, changed_at=?,"
+                             " source=?, end_at=?, location=?, description=?,"
                              " status=CASE status WHEN 'dismissed' THEN 'active' ELSE status END"
                              " WHERE source_event_id=?",
-                             (e["title"], e["url"], e["start"], e["content_hash"], now, now, e["source_event_id"]))
-            else:
-                conn.execute("UPDATE events SET last_seen=? WHERE source_event_id=?", (now, e["source_event_id"]))
+                             (e["title"], e["url"], e["start"], e["content_hash"], now, now, *_details(e),
+                              e["source_event_id"]))
+            else:  # also refreshes the details of rows stored before those columns existed
+                conn.execute("UPDATE events SET last_seen=?, source=?, end_at=?, location=?, description=?"
+                             " WHERE source_event_id=?", (now, *_details(e), e["source_event_id"]))
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('last_event_sync', ?)", (now,))
         cutoff = (datetime.fromisoformat(now) - timedelta(days=KEEP_UNSEEN_DAYS)).isoformat(timespec="seconds")
         conn.execute("DELETE FROM events WHERE last_seen < ?", (cutoff,))
 
 
-def set_status(conn, source_event_id, status):
-    if status not in STATUSES:
-        raise ValueError(f"bad status {status!r}")
+def mark_accepted(conn, checked, accepted, now=None):
+    """Set accepted_at for the `accepted` source ids and clear it for the rest of `checked`
+    (the events the calendar could have matched), so cancelling a calendar entry un-accepts."""
+    now = now or now_iso()
+    accepted = set(accepted)
     with conn:
-        cur = conn.execute("UPDATE events SET status=? WHERE source_event_id=?", (status, source_event_id))
-    return cur.rowcount > 0
+        for i in checked:
+            if i in accepted:
+                conn.execute("UPDATE events SET accepted_at=? WHERE source_event_id=? AND accepted_at IS NULL", (now, i))
+            else:
+                conn.execute("UPDATE events SET accepted_at=NULL WHERE source_event_id=?", (i,))
 
 
-def set_statuses(conn, ids, status):
-    """Bulk set_status. Returns (number updated, ids that matched no known event)."""
+def _resolve(conn, ref):
+    """Source event id for a short ref or a platform id, or None."""
+    n = parse_ref(ref)
+    r = conn.execute("SELECT source_event_id FROM events WHERE id=?", (n,)).fetchone() if n is not None else None
+    if r is None:
+        r = conn.execute("SELECT source_event_id FROM events WHERE source_event_id=?", (str(ref),)).fetchone()
+    return r["source_event_id"] if r else None
+
+
+def set_statuses(conn, refs, status):
+    """Set status on events given as short ids (e42) or platform ids. Returns (number updated, refs that matched none)."""
     if status not in STATUSES:
         raise ValueError(f"bad status {status!r}")
-    ids = list(dict.fromkeys(ids))
+    refs = list(dict.fromkeys(refs))
     unknown = []
     with conn:
-        for i in ids:
-            if not conn.execute("UPDATE events SET status=? WHERE source_event_id=?", (status, i)).rowcount:
-                unknown.append(i)
-    return len(ids) - len(unknown), unknown
+        for ref in refs:
+            sid = _resolve(conn, ref)
+            if sid is None:
+                unknown.append(ref)
+            else:
+                conn.execute("UPDATE events SET status=? WHERE source_event_id=?", (status, sid))
+    return len(refs) - len(unknown), unknown
+
+
+def set_status(conn, ref, status):
+    return set_statuses(conn, [ref], status)[0] > 0
 
 
 def annotate(conn, rows, now=None):
-    """Attach _status and _updated to each event dict. Unknown events count as active."""
+    """Attach _id, _status, _updated and _accepted to each event dict. Unknown events count as active."""
     now = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
-    known = {r["source_event_id"]: r for r in conn.execute("SELECT source_event_id, status, changed_at FROM events")}
+    known = {r["source_event_id"]: r for r in conn.execute(
+        "SELECT id, source_event_id, status, changed_at, accepted_at FROM events")}
     out = []
     for e in rows:
         s = known.get(e["source_event_id"])
         e = dict(e)
+        e["_id"] = s["id"] if s else None
         e["_status"] = s["status"] if s else "active"
+        e["_accepted"] = bool(s and s["accepted_at"])
         e["_updated"] = bool(s and s["changed_at"] and
                              now - datetime.fromisoformat(s["changed_at"]) < timedelta(days=UPDATED_FLAG_DAYS))
         out.append(e)
@@ -199,8 +269,48 @@ def annotate(conn, rows, now=None):
 def visible(conn, rows, now=None):
     """Events to show in the brief; the second value is how many were hidden."""
     ann = annotate(conn, rows, now)
-    shown = [e for e in ann if e["_status"] == "active"]
+    shown = [e for e in ann if e["_status"] == "active" and not e["_accepted"]]
     return shown, len(ann) - len(shown)
+
+
+def _event_dict(r, now):
+    changed = r["changed_at"]
+    return {
+        "id": r["id"], "ref": short_id(r["id"]), "source_event_id": r["source_event_id"],
+        "source": r["source"], "title": r["title"], "url": r["url"], "start": r["start"], "end": r["end_at"],
+        "location": json.loads(r["location"]) if r["location"] else {}, "description": r["description"] or "",
+        "status": r["status"], "accepted": bool(r["accepted_at"]),
+        "updated": bool(changed and now - datetime.fromisoformat(changed) < timedelta(days=UPDATED_FLAG_DAYS)),
+    }
+
+
+def get_event(conn, ref, now=None):
+    """One stored event by short id (e42) or platform id, or None."""
+    sid = _resolve(conn, ref)
+    r = conn.execute("SELECT * FROM events WHERE source_event_id=?", (sid,)).fetchone() if sid else None
+    return _event_dict(r, datetime.now(timezone.utc)) if r else None
+
+
+def list_events(conn, status="active", include_accepted=False, now=None, limit=None):
+    """Upcoming events still on the platforms as of the last collection, soonest first.
+    status: one of STATUSES or 'all'. Accepted (on the calendar) events are left out unless asked for."""
+    if status != "all" and status not in STATUSES:
+        raise ValueError(f"bad status {status!r}")
+    now = now or datetime.now(timezone.utc)
+    sync = conn.execute("SELECT value FROM meta WHERE key='last_event_sync'").fetchone()
+    out = []
+    for r in conn.execute("SELECT * FROM events ORDER BY start, id"):
+        if sync and r["last_seen"] < sync["value"]:
+            continue  # gone from every platform at the last collection
+        if not r["start"] or datetime.fromisoformat(r["start"]) < now:
+            continue
+        if status != "all" and r["status"] != status:
+            continue
+        if r["accepted_at"] and not include_accepted:
+            continue
+        out.append(_event_dict(r, now))
+    out.sort(key=lambda e: (datetime.fromisoformat(e["start"]), e["id"]))
+    return out[:limit] if limit else out
 
 
 # ---------- runs ----------

@@ -13,6 +13,7 @@ Claude config:
 import argparse
 import contextlib
 import json
+import os
 from datetime import datetime, timedelta
 
 import mcp.types as types
@@ -22,6 +23,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.routing import Route
 
+import brief_state
 import toledo_db as db
 
 RELEASE = db.release_version()
@@ -29,6 +31,7 @@ RELEASE = db.release_version()
 # Morning brief: the scheduler/collectors live in toledo_server.py (brief_scheduler.py); this
 # process only reads their output from the shared ~/.toledo/brief/context.md.
 BRIEF_CONTEXT_PATH = db.TOLEDO_HOME / "brief" / "context.md"
+BRIEF_DB_PATH = db.TOLEDO_HOME / "brief.db"
 
 
 def read_brief() -> str:
@@ -36,6 +39,48 @@ def read_brief() -> str:
         return BRIEF_CONTEXT_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
         return "No brief generated yet."
+
+
+def fmt_event_day(e: dict) -> str:
+    return datetime.fromisoformat(e["start"]).strftime("%a %b %d").replace(" 0", " ")
+
+
+def fmt_event_row(e: dict) -> str:
+    """One compact line for list_events: date, title, internal id (no URL, to save tokens)."""
+    flags = (" (updated)" if e["updated"] else "") + (" (on calendar)" if e["accepted"] else "")
+    status = "" if e["status"] == "active" else f" [{e['status']}]"
+    return f"{fmt_event_day(e)} · {e['title']} · {e['ref']}{flags}{status}"
+
+
+def fmt_event_detail(e: dict) -> str:
+    loc = e["location"]
+    where = ", ".join(x for x in (loc.get("name"), loc.get("address"), loc.get("city")) if x)
+    if loc.get("is_online"):
+        where = (where + " " if where else "") + f"(online{': ' + loc['online_url'] if loc.get('online_url') else ''})"
+    start = datetime.fromisoformat(e["start"])
+    when = start.strftime("%a %b %d %H:%M").replace(" 0", " ")
+    if e["end"]:
+        when += "–" + datetime.fromisoformat(e["end"]).strftime("%H:%M")
+    lines = [f"{e['title']} ({e['ref']})", f"When:   {when}"]
+    if where:
+        lines.append(f"Where:  {where}")
+    lines += [f"Link:   {e['url']}", f"Source: {e['source']}",
+              f"State:  {e['status']}" + (", on the calendar" if e["accepted"] else "")
+              + (", details changed recently" if e["updated"] else "")]
+    if e["description"]:
+        lines += ["", e["description"]]
+    return "\n".join(lines)
+
+
+def rerender_brief() -> None:
+    """Refresh the brief's events section after a status change. Best effort: the next run fixes it."""
+    try:
+        import brief_scheduler
+        brief_scheduler.rerender(str(BRIEF_CONTEXT_PATH.parent), str(BRIEF_DB_PATH),
+                                 os.environ.get("TIMEZONE", "Europe/Berlin"),
+                                 int(os.environ.get("EVENT_DAYS", "90")))
+    except Exception:
+        pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -563,11 +608,57 @@ async def list_tools() -> list[types.Tool]:
             name="get_brief",
             description=(
                 "Fetch the latest morning brief as Markdown: calendar (including German/UK/US "
-                "public holidays), weather, and nearby tech events. Generated once a day by a "
+                "public holidays), weather, and a short list of nearby tech events (date, title, id). Generated once a day by a "
                 "background job; this just reads the last run's output. Already included in "
                 "the morning_planning prompt, so call this only when you need it outside that flow."
             ),
             inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="list_events",
+            description=(
+                "Upcoming tech events/meetups to review, soonest first, one line each: "
+                "date · title · id (e.g. e42). Hides events already dismissed, muted, or on the "
+                "user's calendar (those count as accepted). Use get_event for the link and details, "
+                "dismiss_events/mute_events to drop the ones the user is not interested in."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["active", "dismissed", "muted", "all"],
+                               "default": "active"},
+                    "include_accepted": {"type": "boolean", "default": False,
+                                         "description": "Also list events that match a calendar entry"},
+                    "limit": {"type": "integer", "default": 40},
+                },
+            },
+        ),
+        types.Tool(
+            name="get_event",
+            description="Full details for one event by its id (e.g. e42): date/time, venue, link, description.",
+            inputSchema={"type": "object", "properties": {"id": {"type": "string", "description": "e.g. e42"}},
+                         "required": ["id"]},
+        ),
+        types.Tool(
+            name="dismiss_events",
+            description=(
+                "Hide events from the brief and list_events until their details change. For 'not interested "
+                "right now'. Takes one or more ids (e.g. e42)."
+            ),
+            inputSchema={"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
+                         "required": ["ids"]},
+        ),
+        types.Tool(
+            name="mute_events",
+            description="Hide events for good, even if their details change later. Takes one or more ids (e.g. e42).",
+            inputSchema={"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
+                         "required": ["ids"]},
+        ),
+        types.Tool(
+            name="restore_events",
+            description="Make dismissed or muted events active again. Takes one or more ids (e.g. e42).",
+            inputSchema={"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
+                         "required": ["ids"]},
         ),
         types.Tool(
             name="list_projects",
@@ -1173,6 +1264,36 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     # ── get_brief ─────────────────────────────────────────────────────────────
     if name == "get_brief":
         return ok(read_brief())
+
+    # ── events ────────────────────────────────────────────────────────────────
+    if name in ("list_events", "get_event", "dismiss_events", "mute_events", "restore_events"):
+        conn = brief_state.connect(str(BRIEF_DB_PATH))
+        try:
+            if name == "list_events":
+                status = args.get("status") or "active"
+                if status != "all" and status not in brief_state.STATUSES:
+                    return err(f"status must be all or one of {list(brief_state.STATUSES)}")
+                limit = args.get("limit") or 40
+                evs = brief_state.list_events(conn, status, include_accepted=bool(args.get("include_accepted")))
+                if not evs:
+                    return ok("No upcoming events to review.")
+                lines = [f"{len(evs)} upcoming event(s)" + (f", showing the first {limit}" if len(evs) > limit else "") + ":"]
+                return ok("\n".join(lines + [fmt_event_row(e) for e in evs[:limit]]))
+            if name == "get_event":
+                e = brief_state.get_event(conn, args.get("id") or "")
+                return ok(fmt_event_detail(e)) if e else err(f"no event {args.get('id')!r}")
+            ids = args.get("ids") or []
+            if isinstance(ids, str):
+                ids = [ids]
+            if not ids:
+                return err("ids is required")
+            status = {"dismiss_events": "dismissed", "mute_events": "muted", "restore_events": "active"}[name]
+            updated, unknown = brief_state.set_statuses(conn, [str(i) for i in ids], status)
+        finally:
+            conn.close()
+        rerender_brief()
+        msg = f"{updated} event(s) now {status}."
+        return ok(msg + (f" Unknown ids: {', '.join(unknown)}." if unknown else ""))
 
     # ── list_projects ─────────────────────────────────────────────────────────
     if name == "list_projects":

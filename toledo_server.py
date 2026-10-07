@@ -1109,16 +1109,6 @@ def _read_brief_context():
         return None, None
 
 
-def _load_brief_events(conn):
-    """Events from the last collection with their state, in stable date order."""
-    rows = []
-    events_path = os.path.join(brief_runner.raw_dir, "events.jsonl")
-    if os.path.exists(events_path):
-        with open(events_path, encoding="utf-8") as fh:
-            rows = [json.loads(l) for l in fh if l.strip()]
-    return sorted(brief_state.annotate(conn, rows), key=lambda e: (e["start"], e["source_event_id"]))
-
-
 @app.route("/brief.md")
 def brief_markdown():
     text, _ = _read_brief_context()
@@ -1157,17 +1147,22 @@ def run_brief_now():
 
 @app.route("/api/brief/events", methods=["GET"])
 def brief_events():
-    status = request.args.get("status", "all")
-    if status != "all" and status not in brief_state.STATUSES:
-        return jsonify({"error": f"status must be all or one of {list(brief_state.STATUSES)}"}), 400
+    """Upcoming events. ?status=active (default)|dismissed|muted|all, ?accepted=1 to include ones on the calendar,
+    ?id=e42 for one event with its full details."""
     c = brief_state.connect(BRIEF_DB_PATH)
     try:
-        evs = [e for e in _load_brief_events(c) if status in ("all", e["_status"])]
+        if request.args.get("id"):
+            e = brief_state.get_event(c, request.args["id"])
+            return (jsonify(e), 200) if e else (jsonify({"error": "no such event"}), 404)
+        status = request.args.get("status", "active")
+        if status != "all" and status not in brief_state.STATUSES:
+            return jsonify({"error": f"status must be all or one of {list(brief_state.STATUSES)}"}), 400
+        evs = brief_state.list_events(c, status, include_accepted=request.args.get("accepted") in ("1", "true"))
     finally:
         c.close()
     return jsonify({"count": len(evs), "events": [
-        {"id": e["source_event_id"], "title": e["title"], "start": e["start"], "url": e["url"],
-         "source": e["source"], "status": e["_status"], "updated": e["_updated"]} for e in evs]})
+        {k: e[k] for k in ("id", "ref", "title", "start", "url", "source", "status", "accepted", "updated")}
+        | {"where": e["location"].get("name") or e["location"].get("city")} for e in evs]})
 
 
 @app.route("/api/brief/events/status", methods=["POST"])
@@ -1175,11 +1170,11 @@ def brief_event_status():
     data = request.json or {}
     ids, status = data.get("ids"), data.get("status")
     if (status not in brief_state.STATUSES or not isinstance(ids, list)
-            or not all(isinstance(i, str) for i in ids) or len(ids) > 2000):
-        return jsonify({"error": 'send JSON {"ids": ["meetup:123", ...], "status": "active|dismissed|muted"}'}), 400
+            or not all(isinstance(i, (str, int)) for i in ids) or len(ids) > 2000):
+        return jsonify({"error": 'send JSON {"ids": ["e42", ...], "status": "active|dismissed|muted"}'}), 400
     c = brief_state.connect(BRIEF_DB_PATH)
     try:
-        updated, unknown = brief_state.set_statuses(c, ids, status)
+        updated, unknown = brief_state.set_statuses(c, [str(i) for i in ids], status)
     finally:
         c.close()
     brief_runner.rerender()

@@ -92,8 +92,14 @@ class Runner:
         """Rebuild context.md from the saved raw output (fast; applies mute/dismiss immediately)."""
         if self.running:  # the running job renders with fresh state when it finishes
             return
-        brief_build.main(["--from-raw", "--db", self.db_path, "--out", self.context_path,
-                          "--raw-dir", self.raw_dir, "--timezone", self.tz_name, "--event-days", str(self.event_days)])
+        rerender(self.data_dir, self.db_path, self.tz_name, self.event_days)
+
+
+def rerender(data_dir, db_path, tz_name, event_days):
+    """Re-render context.md from the saved raw output. Also used by toledo_mcp.py, which has no Runner."""
+    brief_build.main(["--from-raw", "--db", db_path, "--out", os.path.join(data_dir, "context.md"),
+                      "--raw-dir", os.path.join(data_dir, "out"), "--timezone", tz_name,
+                      "--event-days", str(event_days)])
 
 
 def parse_hhmm(s):
