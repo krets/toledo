@@ -179,28 +179,7 @@ BRIEF_EVENT_LIMIT = 8
 MATCH_WINDOW = timedelta(minutes=60)
 
 
-tokens, same_title = state.tokens, state.same_title
-
-
-def same_place(ev, cal):
-    """Calendar location text names the event's venue (its name, or two or more address words)."""
-    loc = ev["location"]
-    cal_tokens = tokens(cal["location"])
-    name = tokens(loc["name"])
-    if name and name <= cal_tokens:
-        return True
-    return len((name | tokens(loc["address"])) & cal_tokens) >= 2
-
-
-def calendar_matches(ev, cal_events):
-    """True when a timed calendar entry starts within an hour of the event and shares its venue or title."""
-    start = datetime.fromisoformat(ev["start"])
-    for c in cal_events:
-        if c["all_day"] or abs(datetime.fromisoformat(c["start"]) - start) > MATCH_WINDOW:
-            continue
-        if same_place(ev, c) or same_title(ev, c):
-            return True
-    return False
+calendar_matches = state.calendar_matches
 
 
 def drop_accepted(rows, calendar):
@@ -209,12 +188,6 @@ def drop_accepted(rows, calendar):
         return rows, 0
     keep = [e for e in rows if not calendar_matches(e, calendar["events"])]
     return keep, len(rows) - len(keep)
-
-
-def in_calendar_window(ev, calendar):
-    """The event starts inside the span the calendar was fetched for, so absence of a match means something."""
-    start = datetime.fromisoformat(ev["start"])
-    return datetime.fromisoformat(calendar["window_start"]) <= start < datetime.fromisoformat(calendar["window_end"])
 
 
 def trim_calendar(calendar, days):
@@ -349,15 +322,20 @@ def main(argv=None):
     if conn and args.run_id and not args.from_raw:
         state.record_sources(conn, args.run_id, statuses)
 
-    cal_events = (sections_data.get("calendar") or {}).get("events")
+    cal = sections_data.get("calendar")
+    if conn and cal and not args.from_raw:  # keep the database copy that list_events correlates against
+        for label, st in statuses.get("calendar", {}).items():
+            if st.get("ok"):
+                state.store_calendar(conn, label, [e for e in cal["events"] if e["calendar"] == label],
+                                     cal["window_start"], cal["window_end"])
+            else:
+                state.note_calendar_failure(conn, label, st.get("error") or "fetch failed")
     if sections_data.get("events") is not None:
         rows = sections_data["events"]
         if conn and not args.from_raw:
             state.sync_events(conn, rows)
-        if conn and cal_events is not None:  # on the calendar = signed up for, whether or not through Toledo
-            accepted = {e["source_event_id"] for e in rows if calendar_matches(e, cal_events)}
-            state.mark_accepted(conn, [e["source_event_id"] for e in rows if in_calendar_window(e, sections_data["calendar"])],
-                                accepted)
+        if conn:  # on the calendar = signed up for, whether or not through Toledo
+            state.update_accepted(conn)
         if conn:
             sections_data["events"], hidden = state.visible(conn, rows)
         else:

@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS events (
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'dismissed', 'muted')),
     first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
     changed_at TEXT, accepted_at TEXT);
+CREATE TABLE IF NOT EXISTS calendar_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, calendar TEXT NOT NULL,
+    title TEXT, start TEXT, end_at TEXT, all_day INTEGER NOT NULL DEFAULT 0, location TEXT);
+CREATE INDEX IF NOT EXISTS calendar_events_calendar ON calendar_events(calendar);
+CREATE TABLE IF NOT EXISTS calendar_feeds (
+    label TEXT PRIMARY KEY, fetched_at TEXT, attempted_at TEXT, error TEXT,
+    window_start TEXT, window_end TEXT);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL, finished_at TEXT, trigger TEXT,
@@ -256,6 +263,34 @@ def is_duplicate(a, b):
     return same_day(a, b) and times_overlap(a, b) and same_venue(a, b)
 
 
+# ---------- matching against calendar entries ----------
+
+MATCH_WINDOW = timedelta(minutes=60)
+
+
+def same_place(ev, cal):
+    """Calendar location text names the event's venue (its name, or two or more address words)."""
+    loc = ev.get("location") or {}
+    cal_tokens = tokens(cal["location"])
+    name = tokens(loc.get("name"))
+    if name and name <= cal_tokens:
+        return True
+    return len((name | tokens(loc.get("address"))) & cal_tokens) >= 2
+
+
+def entry_matches(ev, c):
+    """A timed calendar entry starts within an hour of the event and shares its venue or title."""
+    if c["all_day"]:
+        return False
+    if abs(datetime.fromisoformat(c["start"]) - datetime.fromisoformat(ev["start"])) > MATCH_WINDOW:
+        return False
+    return same_place(ev, c) or same_title(ev, c)
+
+
+def calendar_matches(ev, cal_events):
+    return any(entry_matches(ev, c) for c in cal_events)
+
+
 def collapse(items, get=lambda e: e):
     """Fold duplicates into the first of each group. Returns [(item, [its duplicates])] in the input order."""
     groups = []
@@ -457,6 +492,96 @@ def list_events(conn, status="active", include_accepted=False, now=None, limit=N
     out.sort(key=lambda e: (datetime.fromisoformat(e["start"]), e["id"]))
     out = [dict(e, same=[d["ref"] for d in dups]) for e, dups in collapse(out)]
     return out[:limit] if limit else out
+
+
+# ---------- calendar cache ----------
+
+CALENDAR_TTL = timedelta(minutes=15)
+CALENDAR_RETRY = timedelta(minutes=2)  # a feed that just failed is not hammered by every call
+HOLIDAY_PREFIX = "holidays_"
+
+
+def store_calendar(conn, label, events, window_start, window_end, now=None):
+    """Replace one feed's cached entries with a fresh fetch."""
+    now = now or now_iso()
+    with conn:
+        conn.execute("DELETE FROM calendar_events WHERE calendar=?", (label,))
+        conn.executemany(
+            "INSERT INTO calendar_events (calendar, title, start, end_at, all_day, location) VALUES (?, ?, ?, ?, ?, ?)",
+            [(label, e["title"], e["start"], e["end"], int(bool(e["all_day"])), e.get("location") or "") for e in events])
+        conn.execute("INSERT OR REPLACE INTO calendar_feeds (label, fetched_at, attempted_at, error, window_start,"
+                     " window_end) VALUES (?, ?, ?, NULL, ?, ?)", (label, now, now, window_start, window_end))
+
+
+def note_calendar_failure(conn, label, error, now=None):
+    """A failed fetch keeps the feed's previous entries; only the attempt and its error are recorded."""
+    now = now or now_iso()
+    with conn:
+        conn.execute("INSERT OR IGNORE INTO calendar_feeds (label) VALUES (?)", (label,))
+        conn.execute("UPDATE calendar_feeds SET attempted_at=?, error=? WHERE label=?", (now, str(error)[:300], label))
+
+
+def calendar_entries(conn):
+    """Every cached calendar entry, in the shape the collector produced."""
+    return [dict(r, all_day=bool(r["all_day"]), end=r["end_at"], calendar=r["calendar"])
+            for r in conn.execute("SELECT * FROM calendar_events ORDER BY start, id")]
+
+
+def stale_feeds(conn, ttl=CALENDAR_TTL, retry=CALENDAR_RETRY, now=None, force=False):
+    """Enabled feed labels that are due a fetch: never fetched or older than ttl, and not tried within `retry`."""
+    now = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
+    seen = {r["label"]: r for r in conn.execute("SELECT * FROM calendar_feeds")}
+    out = []
+    for c in get_calendars(conn):
+        if not c["enabled"]:
+            continue
+        f = seen.get(c["label"])
+        tried = f and f["attempted_at"] and now - datetime.fromisoformat(f["attempted_at"]) < retry
+        fresh = f and f["fetched_at"] and now - datetime.fromisoformat(f["fetched_at"]) < ttl
+        if force or not (fresh or tried):
+            out.append(c["label"])
+    return out
+
+
+def calendar_status(conn, ttl=CALENDAR_TTL, now=None):
+    """{fresh, age_minutes, errors, feeds}: whether conflict data can be trusted as current."""
+    now = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
+    seen = {r["label"]: r for r in conn.execute("SELECT * FROM calendar_feeds")}
+    enabled = [c["label"] for c in get_calendars(conn) if c["enabled"]]
+    ages, errors, missing = [], {}, False
+    for label in enabled:
+        f = seen.get(label)
+        if not f or not f["fetched_at"]:
+            missing = True
+        else:
+            ages.append(now - datetime.fromisoformat(f["fetched_at"]))
+        if f and f["error"] and (not f["fetched_at"] or f["attempted_at"] > f["fetched_at"]):
+            errors[label] = f["error"]
+    oldest = max(ages) if ages else None
+    return {"fresh": bool(enabled) and not missing and oldest <= ttl,
+            "age_minutes": int(oldest.total_seconds() // 60) if oldest is not None else None,
+            "errors": errors, "feeds": len(enabled)}
+
+
+def update_accepted(conn, now=None):
+    """Recompute which events a cached calendar entry matches. A match sets accepted_at, and a lost match clears it
+    only while every enabled feed has been fetched at least once and the event lies inside the cached window."""
+    feeds = [dict(r) for r in conn.execute("SELECT * FROM calendar_feeds WHERE fetched_at IS NOT NULL")]
+    if not feeds:
+        return
+    complete = {c["label"] for c in get_calendars(conn) if c["enabled"]} <= {f["label"] for f in feeds}
+    lo = max(datetime.fromisoformat(f["window_start"]) for f in feeds)
+    hi = min(datetime.fromisoformat(f["window_end"]) for f in feeds)
+    entries = calendar_entries(conn)
+    checked, accepted = [], []
+    for r in map(_ev, conn.execute("SELECT * FROM events WHERE start IS NOT NULL")):
+        start = datetime.fromisoformat(r["start"])
+        hit = calendar_matches(r, entries)
+        if hit:
+            accepted.append(r["source_event_id"])
+        if complete and lo <= start < hi:
+            checked.append(r["source_event_id"])
+    mark_accepted(conn, checked or accepted, accepted, now)
 
 
 # ---------- runs ----------

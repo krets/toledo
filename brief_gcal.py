@@ -20,6 +20,8 @@ import icalendar
 import recurring_ical_events
 import requests
 
+import brief_state as state
+
 UA = "Mozilla/5.0 (X11; Linux x86_64) gcal-collector/0.1 (personal use)"
 
 # Public, key-free Google holiday calendars. Seeded into brief_state on first start;
@@ -93,6 +95,16 @@ def fetch_calendar(sess, label, url, start, end, tz):
     return out
 
 
+def safe_error(exc):
+    """An error line that never contains the feed URL, which is a secret. Library errors (connection pools, redirects)
+    quote the URL in their text, so only our own RuntimeError text and the HTTP status survive."""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return f"HTTPError: {exc.response.status_code} {exc.response.reason}".strip()
+    if isinstance(exc, RuntimeError):
+        return f"RuntimeError: {exc}"
+    return type(exc).__name__
+
+
 def collect(sess, days, tz, feeds=None):
     today = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     start, end = today, today + timedelta(days=days)
@@ -103,10 +115,30 @@ def collect(sess, days, tz, feeds=None):
             events += got
             status[label] = {"ok": True, "events": len(got)}
         except Exception as exc:
-            # never echo the URL: it is a secret
-            status[label] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc).split('http')[0].strip()}"}
+            status[label] = {"ok": False, "error": safe_error(exc)}
     events.sort(key=lambda e: (e["start"], e["title"]))
     return start, end, events, status
+
+
+def refresh_cache(conn, days=90, tz_name="Europe/Berlin", force=False, session=None):
+    """Re-fetch the feeds whose cache is stale (or all of them with force) into the database, then re-check which
+    events the calendar covers. One GET per feed: an iCal URL cannot be date-bounded, so the window is applied after
+    download. A feed that fails keeps its old entries and reports the error through state.calendar_status()."""
+    labels = state.stale_feeds(conn, force=force)
+    if labels:
+        feeds = {c["label"]: c["url"] for c in state.get_calendars(conn) if c["label"] in labels}
+        sess = session or requests.Session()
+        if session is None:
+            sess.headers.update({"User-Agent": UA})
+        start, end, events, status = collect(sess, days, ZoneInfo(tz_name), feeds)
+        for label in feeds:
+            if status[label]["ok"]:
+                state.store_calendar(conn, label, [e for e in events if e["calendar"] == label],
+                                     start.isoformat(), end.isoformat())
+            else:
+                state.note_calendar_failure(conn, label, status[label]["error"])
+        state.update_accepted(conn)
+    return state.calendar_status(conn)
 
 
 def main(argv=None, session=None):
