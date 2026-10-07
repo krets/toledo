@@ -177,14 +177,9 @@ def weather_line(data, llm):
 
 BRIEF_EVENT_LIMIT = 8
 MATCH_WINDOW = timedelta(minutes=60)
-MATCH_STOPWORDS = {"berlin", "germany", "deutschland", "gmbh", "the", "and", "und", "der", "die", "das", "str",
-                   "strasse", "straße", "street", "platz", "event", "events", "meetup", "berlins"}
 
 
-def tokens(text):
-    """Distinctive lowercase words: no short words, bare numbers (house numbers, postcodes) or filler."""
-    words = re.findall(r"[^\W_]+", (text or "").lower())
-    return {w for w in words if len(w) >= 3 and not w.isdigit() and w not in MATCH_STOPWORDS}
+tokens, same_title = state.tokens, state.same_title
 
 
 def same_place(ev, cal):
@@ -195,14 +190,6 @@ def same_place(ev, cal):
     if name and name <= cal_tokens:
         return True
     return len((name | tokens(loc["address"])) & cal_tokens) >= 2
-
-
-def same_title(ev, cal):
-    a, b = tokens(ev["title"]), tokens(cal["title"])
-    if not a or not b:
-        return False
-    common = a & b
-    return len(common) >= 2 and (len(common) / len(a | b) >= 0.5 or common in (a, b))
 
 
 def calendar_matches(ev, cal_events):
@@ -375,8 +362,12 @@ def main(argv=None):
             sections_data["events"], hidden = state.visible(conn, rows)
         else:
             sections_data["events"], hidden = drop_accepted(rows, sections_data.get("calendar"))
+        listed = len(sections_data["events"])
+        sections_data["events"] = [e for e, _ in state.collapse(sections_data["events"])]
         if hidden:
             print(f"events: {hidden} hidden (dismissed, muted or on the calendar)", file=sys.stderr)
+        if listed != len(sections_data["events"]):
+            print(f"events: {listed - len(sections_data['events'])} duplicate listing(s) folded", file=sys.stderr)
     if sections_data.get("calendar"):  # fetched wider than shown, for event matching
         sections_data["calendar"] = trim_calendar(sections_data["calendar"], args.calendar_days)
 

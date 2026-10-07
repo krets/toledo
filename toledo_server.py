@@ -1161,7 +1161,7 @@ def brief_events():
     finally:
         c.close()
     return jsonify({"count": len(evs), "events": [
-        {k: e[k] for k in ("id", "ref", "title", "start", "url", "source", "status", "accepted", "updated")}
+        {k: e[k] for k in ("id", "ref", "title", "start", "url", "source", "status", "accepted", "updated", "same")}
         | {"where": e["location"].get("name") or e["location"].get("city")} for e in evs]})
 
 
@@ -1171,10 +1171,10 @@ def brief_event_status():
     ids, status = data.get("ids"), data.get("status")
     if (status not in brief_state.STATUSES or not isinstance(ids, list)
             or not all(isinstance(i, (str, int)) for i in ids) or len(ids) > 2000):
-        return jsonify({"error": 'send JSON {"ids": ["e42", ...], "status": "active|dismissed|muted"}'}), 400
+        return jsonify({"error": 'send JSON {"ids": ["e42", ...], "status": "active|dismissed|muted", "similar": false}'}), 400
     c = brief_state.connect(BRIEF_DB_PATH)
     try:
-        updated, unknown = brief_state.set_statuses(c, [str(i) for i in ids], status)
+        updated, unknown = brief_state.set_statuses(c, [str(i) for i in ids], status, series=bool(data.get("similar")))
     finally:
         c.close()
     brief_runner.rerender()

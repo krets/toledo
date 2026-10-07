@@ -13,7 +13,9 @@ Accepted events leave the review list and the brief. Each event also has a small
 shown as e<id>, so agents can refer to it without carrying the platform id or URL.
 """
 import json
+import math
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -162,6 +164,111 @@ def delete_calendar(conn, label):
 DESCRIPTION_CHARS = 4000
 
 
+# ---------- title matching (same event listed twice, or a series of them) ----------
+
+MATCH_STOPWORDS = {"berlin", "germany", "deutschland", "gmbh", "the", "and", "und", "der", "die", "das", "str",
+                   "strasse", "straße", "street", "platz", "event", "events", "meetup", "berlins"}
+
+
+def tokens(text):
+    """Distinctive lowercase words: no short words, bare numbers (house numbers, postcodes) or filler."""
+    words = re.findall(r"[^\W_]+", (text or "").lower())
+    return {w for w in words if len(w) >= 3 and not w.isdigit() and w not in MATCH_STOPWORDS}
+
+
+def same_title(ev, other):
+    """Two titles that name the same thing: two or more shared words, half of all words or one title inside the other."""
+    a, b = tokens(ev["title"]), tokens(other["title"])
+    if not a or not b:
+        return False
+    common = a & b
+    return len(common) >= 2 and (len(common) / len(a | b) >= 0.5 or common in (a, b))
+
+
+def same_series(ev, other):
+    """Looser than same_title: most of the shorter title's words are shared, so 'Tech Mixer' matches 'Tech Mixer Berlin Oct'."""
+    a, b = tokens(ev["title"]), tokens(other["title"])
+    common = a & b
+    return len(common) >= 2 and len(common) / min(len(a), len(b)) >= 0.6
+
+
+def same_day(ev, other):
+    return bool(ev["start"] and other["start"]) and ev["start"][:10] == other["start"][:10]
+
+
+DEFAULT_HOURS = 2
+SOURCE_HOURS = {"meetup": 3}  # meetups run long and rarely publish an end time
+VENUE_METERS = 150
+
+
+def _source(ev):
+    src = ev.get("source")
+    if not src:  # rows stored before the source column existed
+        prefix = (ev.get("source_event_id") or "").split(":")[0]
+        src = prefix if prefix in ("meetup", "luma", "eventbrite") else None
+    return src
+
+
+def event_span(ev):
+    """(start, end) of an event; a missing end is guessed from the source."""
+    start = datetime.fromisoformat(ev["start"])
+    if ev.get("end"):
+        return start, datetime.fromisoformat(ev["end"])
+    return start, start + timedelta(hours=SOURCE_HOURS.get(_source(ev), DEFAULT_HOURS))
+
+
+def times_overlap(a, b):
+    try:
+        (a0, a1), (b0, b1) = event_span(a), event_span(b)
+        return a0 < b1 and b0 < a1
+    except (TypeError, ValueError):  # missing start, or naive vs aware datetimes
+        return False
+
+
+def _meters(la, lb):
+    (lat1, lon1), (lat2, lon2) = [(math.radians(float(x["lat"])), math.radians(float(x["lon"]))) for x in (la, lb)]
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 12742000 * math.asin(math.sqrt(h))
+
+
+def same_venue(a, b):
+    """Both events are at the same physical place: coordinates a stone's throw apart, the same venue name, or the
+    same street with a shared house number. Online events have no venue."""
+    la, lb = a.get("location") or {}, b.get("location") or {}
+    if la.get("is_online") or lb.get("is_online"):
+        return False
+    if all(x.get("lat") is not None and x.get("lon") is not None for x in (la, lb)):
+        return _meters(la, lb) <= VENUE_METERS
+    na, nb = tokens(la.get("name")), tokens(lb.get("name"))
+    if na and na == nb:
+        return True
+    sa, sb = tokens(la.get("address")), tokens(lb.get("address"))
+    numa = set(re.findall(r"\d+", la.get("address") or ""))
+    numb = set(re.findall(r"\d+", lb.get("address") or ""))
+    return bool(sa & sb) and bool(numa & numb)
+
+
+def is_duplicate(a, b):
+    """The same event listed twice (typically on two platforms): same day with the same title, or overlapping
+    times at the same venue. Venue matching can fold two real events held at one place at once."""
+    if same_day(a, b) and same_title(a, b):
+        return True
+    return same_day(a, b) and times_overlap(a, b) and same_venue(a, b)
+
+
+def collapse(items, get=lambda e: e):
+    """Fold duplicates into the first of each group. Returns [(item, [its duplicates])] in the input order."""
+    groups = []
+    for it in items:
+        for g in groups:
+            if is_duplicate(get(g[0]), get(it)):
+                g[1].append(it)
+                break
+        else:
+            groups.append((it, []))
+    return groups
+
+
 def short_id(n):
     return f"e{n}"
 
@@ -179,6 +286,23 @@ def _details(e):
             (e.get("description") or "")[:DESCRIPTION_CHARS])
 
 
+def _ev(r):
+    """A stored event row as the dict the matching helpers expect (location decoded, end under 'end')."""
+    d = dict(r)
+    loc = d.get("location")
+    d["location"] = json.loads(loc) if isinstance(loc, str) and loc else (loc if isinstance(loc, dict) else {})
+    d["end"] = d.get("end_at")
+    return d
+
+
+def _inherited_status(conn, e):
+    """A new listing of an event the user already hid arrives hidden too ('muted' beats 'dismissed')."""
+    seen = {r["status"] for r in map(_ev, conn.execute(
+        "SELECT * FROM events WHERE substr(start, 1, 10)=substr(?, 1, 10)", (e["start"] or "",)))
+        if is_duplicate(e, r)}
+    return "muted" if "muted" in seen else "dismissed" if "dismissed" in seen else "active"
+
+
 def sync_events(conn, rows, now=None):
     """Record this run's events; a changed content_hash re-surfaces dismissed events."""
     now = now or now_iso()
@@ -188,9 +312,10 @@ def sync_events(conn, rows, now=None):
                                (e["source_event_id"],)).fetchone()
             if old is None:
                 conn.execute("INSERT INTO events (source_event_id, title, url, start, content_hash, first_seen, last_seen,"
-                             " source, end_at, location, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             " source, end_at, location, description, status)"
+                             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (e["source_event_id"], e["title"], e["url"], e["start"], e["content_hash"], now, now,
-                              *_details(e)))
+                              *_details(e), _inherited_status(conn, e)))
             elif old["content_hash"] != e["content_hash"]:
                 conn.execute("UPDATE events SET title=?, url=?, start=?, content_hash=?, last_seen=?, changed_at=?,"
                              " source=?, end_at=?, location=?, description=?,"
@@ -228,24 +353,35 @@ def _resolve(conn, ref):
     return r["source_event_id"] if r else None
 
 
-def set_statuses(conn, refs, status):
-    """Set status on events given as short ids (e42) or platform ids. Returns (number updated, refs that matched none)."""
+def apply_status(conn, refs, status, series=False, now=None):
+    """Set status on events given as short ids (e42) or platform ids, and on their duplicates. With series, also on
+    every upcoming event whose title matches loosely. Returns ([{ref, title, start}] changed, refs that matched none)."""
     if status not in STATUSES:
         raise ValueError(f"bad status {status!r}")
-    refs = list(dict.fromkeys(refs))
-    unknown = []
+    now = now or datetime.now(timezone.utc)
+    rows = [_ev(r) for r in conn.execute("SELECT * FROM events")]
+    by_sid = {r["source_event_id"]: r for r in rows}
+    hit, unknown = {}, []
+    for ref in dict.fromkeys(refs):
+        sid = _resolve(conn, ref)
+        if sid is None:
+            unknown.append(ref)
+            continue
+        base = by_sid[sid]
+        for r in rows:
+            if r is base or is_duplicate(base, r) or (
+                    series and r["start"] and datetime.fromisoformat(r["start"]) >= now and same_series(base, r)):
+                hit[r["id"]] = r
     with conn:
-        for ref in refs:
-            sid = _resolve(conn, ref)
-            if sid is None:
-                unknown.append(ref)
-            else:
-                conn.execute("UPDATE events SET status=? WHERE source_event_id=?", (status, sid))
-    return len(refs) - len(unknown), unknown
+        conn.executemany("UPDATE events SET status=? WHERE id=?", [(status, i) for i in hit])
+    changed = sorted(hit.values(), key=lambda r: r["id"])
+    return [{"ref": short_id(r["id"]), "title": r["title"], "start": r["start"]} for r in changed], unknown
 
 
-def set_status(conn, ref, status):
-    return set_statuses(conn, [ref], status)[0] > 0
+def set_statuses(conn, refs, status, series=False):
+    """apply_status, as (number of events changed, refs that matched none)."""
+    changed, unknown = apply_status(conn, refs, status, series)
+    return len(changed), unknown
 
 
 def annotate(conn, rows, now=None):
@@ -280,7 +416,9 @@ def _event_dict(r, now):
         "source": r["source"], "title": r["title"], "url": r["url"], "start": r["start"], "end": r["end_at"],
         "location": json.loads(r["location"]) if r["location"] else {}, "description": r["description"] or "",
         "status": r["status"], "accepted": bool(r["accepted_at"]),
-        "updated": bool(changed and now - datetime.fromisoformat(changed) < timedelta(days=UPDATED_FLAG_DAYS)),
+        # only worth flagging while the event is on the review list
+        "updated": r["status"] == "active" and bool(
+            changed and now - datetime.fromisoformat(changed) < timedelta(days=UPDATED_FLAG_DAYS)),
     }
 
 
@@ -288,7 +426,14 @@ def get_event(conn, ref, now=None):
     """One stored event by short id (e42) or platform id, or None."""
     sid = _resolve(conn, ref)
     r = conn.execute("SELECT * FROM events WHERE source_event_id=?", (sid,)).fetchone() if sid else None
-    return _event_dict(r, datetime.now(timezone.utc)) if r else None
+    if not r:
+        return None
+    ev = _event_dict(r, datetime.now(timezone.utc))
+    me = _ev(r)
+    ev["same"] = [{"ref": short_id(o["id"]), "source": o["source"], "url": o["url"]} for o in map(_ev, conn.execute(
+        "SELECT * FROM events WHERE id!=? AND substr(start, 1, 10)=?", (r["id"], (r["start"] or "")[:10])))
+        if is_duplicate(me, o)]
+    return ev
 
 
 def list_events(conn, status="active", include_accepted=False, now=None, limit=None):
@@ -310,6 +455,7 @@ def list_events(conn, status="active", include_accepted=False, now=None, limit=N
             continue
         out.append(_event_dict(r, now))
     out.sort(key=lambda e: (datetime.fromisoformat(e["start"]), e["id"]))
+    out = [dict(e, same=[d["ref"] for d in dups]) for e, dups in collapse(out)]
     return out[:limit] if limit else out
 
 

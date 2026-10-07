@@ -1014,9 +1014,10 @@ App.setBriefEventFilter = function(f) {
   App.renderMain();
 };
 
-App.setBriefEventStatus = async function(id, status) {
+App.setBriefEventStatus = async function(id, status, similar) {
   try {
-    await api('POST', '/api/brief/events/status', { ids: [id], status });
+    const res = await api('POST', '/api/brief/events/status', { ids: [id], status, similar: !!similar });
+    if (res.updated > 1) App.toast(`✓ ${res.updated} events ${status === 'active' ? 'restored' : status}`);
     await App.loadBriefEvents();
     App.renderMain();
   } catch(e) { App.toast('✗ ' + e.message); }
@@ -1031,17 +1032,17 @@ App.buildBriefEvents = function() {
   const filters = [['active', 'Active'], ['dismissed', 'Dismissed'], ['muted', 'Muted'], ['calendar', 'On calendar']];
   const evs = all.filter(match);
   const fmtDay = iso => new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
-  const act = (id, status, label) => `<button class="abtn" onclick="App.setBriefEventStatus('${esc(id)}','${status}')">${label}</button>`;
+  const act = (id, status, label, similar) => `<button class="abtn" title="${similar ? 'Also every upcoming event with a near-identical title' : ''}" onclick="App.setBriefEventStatus('${esc(id)}','${status}'${similar ? ',true' : ''})">${label}</button>`;
   return `<div class="brief-bar"><div class="brief-tabs">${filters.map(([k, label]) =>
       `<button class="filter-btn${f === k ? ' active' : ''}" onclick="App.setBriefEventFilter('${k}')">${label} ${count(k)}</button>`).join('')}</div></div>
     <div class="ev-list">${evs.length ? evs.map(e => `
       <div class="ev-row">
         <div class="ev-main">
           ${e.url ? `<a class="ev-title" href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.title)}</a>` : `<span class="ev-title">${esc(e.title)}</span>`}${e.updated ? '<span class="ev-tag">updated</span>' : ''}
-          <div class="ev-meta">${esc(fmtDay(e.start))}${e.where ? ' · ' + esc(e.where) : ''} · ${esc(e.source || '')} · ${esc(e.ref)}</div>
+          <div class="ev-meta">${esc(fmtDay(e.start))}${e.where ? ' · ' + esc(e.where) : ''} · ${esc(e.source || '')} · ${esc(e.ref)}${(e.same || []).length ? ` · +${e.same.length} same (${esc(e.same.join(', '))})` : ''}</div>
         </div>
         <div class="ev-acts">${e.accepted ? '' : e.status === 'active'
-          ? act(e.ref, 'dismissed', 'Dismiss') + act(e.ref, 'muted', 'Mute')
+          ? act(e.ref, 'dismissed', 'Dismiss') + act(e.ref, 'dismissed', 'Series', true) + act(e.ref, 'muted', 'Mute')
           : act(e.ref, 'active', 'Restore')}</div>
       </div>`).join('') : '<p class="md-empty" style="padding:14px 0">Nothing here.</p>'}</div>`;
 };

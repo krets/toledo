@@ -41,6 +41,17 @@ def read_brief() -> str:
         return "No brief generated yet."
 
 
+EVENT_IDS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ids": {"type": "array", "items": {"type": "string"}},
+        "similar": {"type": "boolean", "default": False,
+                    "description": "Also apply to every upcoming event with a near-identical title (a series)"},
+    },
+    "required": ["ids"],
+}
+
+
 def fmt_event_day(e: dict) -> str:
     return datetime.fromisoformat(e["start"]).strftime("%a %b %d").replace(" 0", " ")
 
@@ -49,7 +60,8 @@ def fmt_event_row(e: dict) -> str:
     """One compact line for list_events: date, title, internal id (no URL, to save tokens)."""
     flags = (" (updated)" if e["updated"] else "") + (" (on calendar)" if e["accepted"] else "")
     status = "" if e["status"] == "active" else f" [{e['status']}]"
-    return f"{fmt_event_day(e)} · {e['title']} · {e['ref']}{flags}{status}"
+    same = f" (+{len(e['same'])} same: {', '.join(e['same'])})" if e.get("same") else ""
+    return f"{fmt_event_day(e)} · {e['title']} · {e['ref']}{flags}{status}{same}"
 
 
 def fmt_event_detail(e: dict) -> str:
@@ -67,6 +79,8 @@ def fmt_event_detail(e: dict) -> str:
     lines += [f"Link:   {e['url']}", f"Source: {e['source']}",
               f"State:  {e['status']}" + (", on the calendar" if e["accepted"] else "")
               + (", details changed recently" if e["updated"] else "")]
+    for d in e.get("same", []):
+        lines.append(f"Also listed as {d['ref']} ({d['source'] or 'unknown source'}): {d['url']}")
     if e["description"]:
         lines += ["", e["description"]]
     return "\n".join(lines)
@@ -643,22 +657,28 @@ async def list_tools() -> list[types.Tool]:
             name="dismiss_events",
             description=(
                 "Hide events from the brief and list_events until their details change. For 'not interested "
-                "right now'. Takes one or more ids (e.g. e42)."
+                "right now'. Takes one or more ids (e.g. e42); duplicate listings of the same event "
+                "are hidden with it. Pass similar=true to also hide every upcoming event with a "
+                "near-identical title (a series)."
             ),
-            inputSchema={"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
-                         "required": ["ids"]},
+            inputSchema=EVENT_IDS_SCHEMA,
         ),
         types.Tool(
             name="mute_events",
-            description="Hide events for good, even if their details change later. Takes one or more ids (e.g. e42).",
-            inputSchema={"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
-                         "required": ["ids"]},
+            description=(
+                "Hide events for good, even if their details change later. Takes one or more ids "
+                "(e.g. e42); duplicate listings go with it. similar=true also mutes every upcoming "
+                "event with a near-identical title (a series)."
+            ),
+            inputSchema=EVENT_IDS_SCHEMA,
         ),
         types.Tool(
             name="restore_events",
-            description="Make dismissed or muted events active again. Takes one or more ids (e.g. e42).",
-            inputSchema={"type": "object", "properties": {"ids": {"type": "array", "items": {"type": "string"}}},
-                         "required": ["ids"]},
+            description=(
+                "Make dismissed or muted events active again. Takes one or more ids (e.g. e42); "
+                "duplicates and, with similar=true, series matches come back too."
+            ),
+            inputSchema=EVENT_IDS_SCHEMA,
         ),
         types.Tool(
             name="list_projects",
@@ -1291,12 +1311,16 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             if not ids:
                 return err("ids is required")
             status = {"dismiss_events": "dismissed", "mute_events": "muted", "restore_events": "active"}[name]
-            updated, unknown = brief_state.set_statuses(conn, [str(i) for i in ids], status)
+            changed, unknown = brief_state.apply_status(conn, [str(i) for i in ids], status,
+                                                        series=bool(args.get("similar")))
         finally:
             conn.close()
         rerender_brief()
-        msg = f"{updated} event(s) now {status}."
-        return ok(msg + (f" Unknown ids: {', '.join(unknown)}." if unknown else ""))
+        asked = {str(i).lstrip("#").lower() for i in ids}
+        lines = [f"{len(changed)} event(s) now {status}."]
+        # Show what the duplicate/series expansion touched beyond the ids that were asked for.
+        lines += [f"  also {c['ref']} · {fmt_event_day(c)} · {c['title']}" for c in changed if c["ref"] not in asked]
+        return ok("\n".join(lines) + (f"\nUnknown ids: {', '.join(unknown)}." if unknown else ""))
 
     # ── list_projects ─────────────────────────────────────────────────────────
     if name == "list_projects":
