@@ -948,6 +948,9 @@ _ARG_ALIASES = {
     "rename_tag":     {"old": "tag", "from": "tag", "new": "name", "to": "name", "new_name": "name"},
 }
 
+# These take event ids, not task references, so the task aliases above don't apply.
+_EVENT_TOOLS = {"list_events", "get_event", "dismiss_events", "mute_events", "restore_events"}
+
 _required_args: dict[str, list[str]] | None = None
 
 
@@ -962,7 +965,7 @@ async def _required_for(name: str) -> list[str]:
 
 def _normalize_args(name: str, args: dict) -> dict:
     out = dict(args)
-    aliases = {**_ARG_ALIASES_ALL, **_ARG_ALIASES.get(name, {})}
+    aliases = {**({} if name in _EVENT_TOOLS else _ARG_ALIASES_ALL), **_ARG_ALIASES.get(name, {})}
     for alias, canonical in aliases.items():
         if alias in out and canonical not in out:
             out[canonical] = out.pop(alias)
