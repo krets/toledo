@@ -329,6 +329,7 @@ Toledo ships guided-session prompts:
 - morning_planning: start-of-day "what should I work on" session
 - end_of_day_dump: end-of-day brain dump reconciled against tasks and the glossary
 - periodic_audit: infrequent deep audit of tasks, categories, and goals
+- event_review: triage and review upcoming tech events/meetups, a page at a time
 
 When the user asks for one of these sessions (e.g. "let's plan my day", "end of day \
 dump"), fetch its full instructions first and follow them. The fetched prompt ends with \
@@ -968,7 +969,7 @@ async def list_tools() -> list[types.Tool]:
             name="list_prompts",
             description=(
                 "List Toledo's MCP prompts (name, description) — end_of_day_dump, "
-                "morning_planning, periodic_audit. Exists for clients that only surface MCP "
+                "morning_planning, periodic_audit, event_review. Exists for clients that only surface MCP "
                 "tools, not the prompts capability; fetch a prompt's text with get_prompt."
             ),
             inputSchema={"type": "object", "properties": {}},
@@ -1654,6 +1655,60 @@ changes applied on top, so there is no need to re-read Toledo. Weight it by urge
 or overdue items beats padding out a round number.
 """
 
+EVENT_REVIEW_PROMPT = """\
+You are running Toledo's event review: a short, repeatable pass over upcoming tech events and \
+meetups. The user invokes it whenever they have time; there is no fixed cadence. You work \
+through one page of events at a time using list_events, get_event, dismiss_events, \
+mute_events and restore_events. Events that already match a calendar entry are accepted \
+automatically and never appear in the list.
+
+Who the events are for: a Berlin-based senior technologist (about 20 years: VFX pipelines, \
+infrastructure architecture, CTO and technical leadership, AI and generative systems) who is \
+looking for a staff or senior individual-contributor role in platform engineering, developer \
+tooling, backend systems or AI infrastructure, and who also freelances on AI integrations, \
+generative workflows and cloud infrastructure. Interests: programming languages, software \
+engineering, reliability, machine learning, UX, VR/AR, AI infrastructure and open models, \
+developer tooling, and networking with engineers and technical leaders where it could help \
+a job search. Anything that does not fit this is a non-fit. Exceptions: an event tied to a \
+company the user has an active application with (see the active job tasks at the end) is \
+kept active even when its format is not to their taste.
+
+Follow this sequence:
+
+1. Call list_events with no arguments. It returns about 10 upcoming events, soonest first, \
+each with every calendar entry on its day. Read the calendar status line: if it says the \
+calendar is stale or missing, do no conflict-based triage this pass.
+
+2. Triage without asking, using dismiss_events with the ids:
+   - Obvious non-fits per the profile above: dismiss.
+   - A hard conflict: the event is flagged "overlaps" with a timed calendar entry, and the \
+calendar status is current: dismiss.
+   - An all-day entry is only a possible conflict, since it may really be at a specific time. \
+The calendar is shared and some entries belong to someone else, so an overlapping entry is \
+not proof either. Do not dismiss on all-day entries or holiday entries. Keep the event and \
+mention the clash when you raise it.
+   - A series that is clearly a non-fit: dismiss_events with similar=true on one of its ids.
+   Everything else stays for step 3.
+
+3. Open with one terse line naming what you dismissed and why, as ids and a few words each, \
+so the user can reverse any of it. Then walk through the remainder, two or three at a time. \
+Call get_event for each one you raise, since the list has no descriptions. Raise events \
+relevant to career development and the job search first, and prefer sooner events, because \
+registration is still open for them. For each give the date, title, one sentence on what it \
+is, and any calendar clash.
+
+4. Act on the user's decision for each event: dismiss_events to drop it for now, mute_events \
+to hide it for good, or leave it active. If they ask to undo something, use restore_events.
+
+5. When the page is done, continue with list_events after=<id of the last event on the \
+page> whenever the user wants more. Do not offer to continue; wait to be told.
+
+Interaction rules: be terse and direct. Ask no follow-up questions and add no affirmations \
+or process explanations. Keep batches short. The user drives the conversation and you \
+execute. Speak only in response to what they say, apart from the opening triage line and \
+the first batch.
+"""
+
 MORNING_PLANNING_PROMPT = """\
 You are running Toledo's morning planning session ("what should I work on"). Its job is to \
 support the user's own planning, not to interview them or steer them.
@@ -1799,6 +1854,14 @@ async def list_prompts() -> list[types.Prompt]:
             ),
         ),
         types.Prompt(
+            name="event_review",
+            description=(
+                "Review upcoming tech events/meetups a page at a time: auto-dismiss non-fits and "
+                "clear calendar conflicts, then walk through the rest and dismiss, mute or keep. "
+                "Trigger phrases: 'event review', 'review events'."
+            ),
+        ),
+        types.Prompt(
             name="periodic_audit",
             description=(
                 "Periodic (3-6 month) deep audit: prune stale tasks, refine categories, "
@@ -1814,14 +1877,27 @@ async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPr
         "end_of_day_dump":   END_OF_DAY_DUMP_PROMPT,
         "morning_planning":  MORNING_PLANNING_PROMPT,
         "periodic_audit":    PERIODIC_AUDIT_PROMPT,
+        "event_review":      EVENT_REVIEW_PROMPT,
     }
     if name not in prompts:
         raise ValueError(f"Unknown prompt: {name}")
+    if name == "event_review":  # no full snapshot: events and a few job tasks are all it needs
+        return types.GetPromptResult(messages=[_prompt_message(prompts[name] + await _event_review_context())])
     text = prompts[name] + await _snapshot("active")
     if name == "morning_planning":
         text += _latest_journal_section()
         text += _latest_brief_section()
     return types.GetPromptResult(messages=[_prompt_message(text)])
+
+
+async def _event_review_context() -> str:
+    """What event_review needs beyond list_events: today's date and the active job-search tasks, so events tied to
+    a company with an open application are kept."""
+    try:
+        jobs = (await _dispatch("list_tasks", {"state": "active", "project": "Job/Work"}))[0].text
+    except Exception:
+        jobs = "(could not load)"
+    return f"\n\n---\n# Today\n{datetime.now():%A %Y-%m-%d %H:%M}\n\n# Active job tasks\n{jobs}\n"
 
 
 def _latest_journal_section() -> str:
