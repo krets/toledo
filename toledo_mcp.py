@@ -11,6 +11,7 @@ Claude config:
 """
 
 import argparse
+import asyncio
 import contextlib
 import json
 import os
@@ -79,11 +80,55 @@ def fmt_event_detail(e: dict) -> str:
     lines += [f"Link:   {e['url']}", f"Source: {e['source']}",
               f"State:  {e['status']}" + (", on the calendar" if e["accepted"] else "")
               + (", details changed recently" if e["updated"] else "")]
+    if e.get("conflicts"):
+        lines.append("Calendar that day: " + "; ".join(fmt_conflict(c) for c in e["conflicts"]))
     for d in e.get("same", []):
         lines.append(f"Also listed as {d['ref']} ({d['source'] or 'unknown source'}): {d['url']}")
     if e["description"]:
         lines += ["", e["description"]]
     return "\n".join(lines)
+
+
+def fmt_conflict(c: dict) -> str:
+    """One calendar entry on an event's day: time or all-day, title, and what is notable about it."""
+    if c["all_day"]:
+        when = "all-day"
+    else:
+        when = datetime.fromisoformat(c["start"]).strftime("%H:%M")
+        if c["end"]:
+            when += "–" + datetime.fromisoformat(c["end"]).strftime("%H:%M")
+    notes = [n for n, on in (("overlaps", c["overlaps"]), ("holiday", c["holiday"]), ("this event", c["this_event"])) if on]
+    return f"{when} {c['title']}" + (f" ({', '.join(notes)})" if notes else "")
+
+
+def fmt_calendar_status(cal: dict, refresh_error: str | None = None) -> str:
+    if refresh_error:
+        return f"Calendar: could not refresh ({refresh_error}); conflicts may be out of date."
+    if cal["feeds"] == 0:
+        return "Calendar: no calendar feeds configured, so no conflicts are shown."
+    why = "; ".join(f"{k}: {v}" for k, v in cal["errors"].items())
+    if cal["age_minutes"] is None:
+        return "Calendar: nothing cached yet, so no conflicts are shown" + (f" ({why})." if why else ".")
+    if cal["fresh"]:
+        return (f"Calendar: current (cached {cal['age_minutes']} min ago)."
+                + (f" The latest refresh failed ({why}); this is the earlier copy." if why else ""))
+    return (f"Calendar: STALE, cached {cal['age_minutes']} min ago" + (f" ({why})" if why else "")
+            + ". Conflicts may be out of date; do not act on them without checking.")
+
+
+def refresh_calendar(force: bool) -> str | None:
+    """Re-fetch stale calendar feeds into the cache. Returns an error message, or None. Blocking: run in a thread."""
+    try:
+        import brief_gcal
+        conn = brief_state.connect(str(BRIEF_DB_PATH))
+        try:
+            brief_gcal.refresh_cache(conn, int(os.environ.get("EVENT_DAYS", "90")),
+                                     os.environ.get("TIMEZONE", "Europe/Berlin"), force=force)
+        finally:
+            conn.close()
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+    return None
 
 
 def rerender_brief() -> None:
@@ -631,10 +676,12 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="list_events",
             description=(
-                "Upcoming tech events/meetups to review, soonest first, one line each: "
-                "date · title · id (e.g. e42). Hides events already dismissed, muted, or on the "
-                "user's calendar (those count as accepted). Use get_event for the link and details, "
-                "dismiss_events/mute_events to drop the ones the user is not interested in."
+                "Upcoming tech events/meetups to review, soonest first, in pages of about 10 "
+                "(continue with after=<last id>). Each is date · title · id (e.g. e42), followed by "
+                "every calendar entry on that day (flagged: overlaps, all-day, holiday, this event). "
+                "Conflicts are computed in code, but the calendar is shared, so an entry may not be "
+                "the user's. Hides events already dismissed, muted, or on the calendar (accepted). "
+                "Use get_event for the link and details, dismiss_events/mute_events to drop events."
             ),
             inputSchema={
                 "type": "object",
@@ -643,7 +690,10 @@ async def list_tools() -> list[types.Tool]:
                                "default": "active"},
                     "include_accepted": {"type": "boolean", "default": False,
                                          "description": "Also list events that match a calendar entry"},
-                    "limit": {"type": "integer", "default": 40},
+                    "limit": {"type": "integer", "default": 10, "description": "Events per page"},
+                    "after": {"type": "string", "description": "Continue after this event id (the previous page's last)"},
+                    "refresh": {"type": "boolean", "default": False,
+                                "description": "Re-fetch the calendar feeds now instead of using the 15-minute cache"},
                 },
             },
         ),
@@ -1296,15 +1346,27 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
                 status = args.get("status") or "active"
                 if status != "all" and status not in brief_state.STATUSES:
                     return err(f"status must be all or one of {list(brief_state.STATUSES)}")
-                limit = args.get("limit") or 40
-                evs = brief_state.list_events(conn, status, include_accepted=bool(args.get("include_accepted")))
-                if not evs:
-                    return ok("No upcoming events to review.")
-                lines = [f"{len(evs)} upcoming event(s)" + (f", showing the first {limit}" if len(evs) > limit else "") + ":"]
-                return ok("\n".join(lines + [fmt_event_row(e) for e in evs[:limit]]))
+                refresh_error = await asyncio.to_thread(refresh_calendar, bool(args.get("refresh")))
+                page = brief_state.event_page(conn, after=args.get("after"), limit=args.get("limit") or 10,
+                                              status=status, include_accepted=bool(args.get("include_accepted")))
+                if not page["events"]:
+                    return ok("No upcoming events to review." if not args.get("after") else "No more events.")
+                lo, hi = (datetime.fromisoformat(d).strftime("%b %d").replace(" 0", " ") for d in page["window"])
+                head = f"{len(page['events'])} event(s), {lo} – {hi}"
+                if page["next"]:
+                    head += f"; {page['remaining']} more (continue with after={page['next']})"
+                lines = [head, fmt_calendar_status(page["calendar"], refresh_error), ""]
+                for e in page["events"]:
+                    lines.append(fmt_event_row(e))
+                    if e["conflicts"]:
+                        lines.append("    calendar: " + "; ".join(fmt_conflict(c) for c in e["conflicts"]))
+                return ok("\n".join(lines))
             if name == "get_event":
+                refresh_error = await asyncio.to_thread(refresh_calendar, False)
                 e = brief_state.get_event(conn, args.get("id") or "")
-                return ok(fmt_event_detail(e)) if e else err(f"no event {args.get('id')!r}")
+                if not e:
+                    return err(f"no event {args.get('id')!r}")
+                return ok(fmt_event_detail(e) + "\n\n" + fmt_calendar_status(brief_state.calendar_status(conn), refresh_error))
             ids = args.get("ids") or []
             if isinstance(ids, str):
                 ids = [ids]

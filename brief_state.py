@@ -468,6 +468,7 @@ def get_event(conn, ref, now=None):
     ev["same"] = [{"ref": short_id(o["id"]), "source": o["source"], "url": o["url"]} for o in map(_ev, conn.execute(
         "SELECT * FROM events WHERE id!=? AND substr(start, 1, 10)=?", (r["id"], (r["start"] or "")[:10])))
         if is_duplicate(me, o)]
+    ev["conflicts"] = conflicts_for(ev, calendar_entries(conn))
     return ev
 
 
@@ -582,6 +583,45 @@ def update_accepted(conn, now=None):
         if complete and lo <= start < hi:
             checked.append(r["source_event_id"])
     mark_accepted(conn, checked or accepted, accepted, now)
+
+
+def conflicts_for(ev, entries):
+    """Every cached calendar entry on the event's day, flagged: overlaps in time, all-day, a holiday feed, or this
+    event's own calendar entry. Several may be someone else's; the reader judges."""
+    day = datetime.fromisoformat(ev["start"]).date()
+    out = []
+    for c in entries:
+        first = datetime.fromisoformat(c["start"]).date()
+        end = datetime.fromisoformat(c["end"]) if c["end"] else None
+        last = ((end.date() - timedelta(days=1)) if c["all_day"] else end.date()) if end else first
+        if not (first <= day <= max(first, last)):
+            continue
+        overlaps = (not c["all_day"]) and times_overlap(ev, {"start": c["start"], "end": c["end"]})
+        out.append({"title": c["title"], "start": c["start"], "end": c["end"], "all_day": c["all_day"],
+                    "overlaps": overlaps, "holiday": c["calendar"].startswith(HOLIDAY_PREFIX),
+                    "this_event": entry_matches(ev, c)})
+    out.sort(key=lambda x: (not x["all_day"], x["start"]))
+    return out
+
+
+def event_page(conn, after=None, limit=10, status="active", include_accepted=False, now=None):
+    """One page of upcoming events, soonest first, each with its calendar conflicts. `after` is the ref of the last
+    event of the previous page, so paging holds still while events are dismissed in between."""
+    evs = list_events(conn, status, include_accepted, now)
+    if after:
+        r = conn.execute("SELECT id, start FROM events WHERE id=?", (parse_ref(after),)).fetchone() if parse_ref(after) else None
+        if r is None:
+            raise ValueError(f"no event {after!r} to continue after")
+        key = (datetime.fromisoformat(r["start"]), r["id"])
+        evs = [e for e in evs if (datetime.fromisoformat(e["start"]), e["id"]) > key]
+    page = evs[:limit]
+    entries = calendar_entries(conn)
+    for e in page:
+        e["conflicts"] = conflicts_for(e, entries)
+    return {"events": page, "remaining": len(evs) - len(page),
+            "next": page[-1]["ref"] if len(evs) > len(page) else None,
+            "window": [page[0]["start"][:10], page[-1]["start"][:10]] if page else None,
+            "calendar": calendar_status(conn)}
 
 
 # ---------- runs ----------
