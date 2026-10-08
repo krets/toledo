@@ -1466,6 +1466,10 @@ def set_glossary_term(term: str, canonical: str, source: str | None = None) -> N
         old = c.execute("SELECT canonical FROM glossary WHERE term = ?", (term,)).fetchone()
         if old and old["canonical"] == canonical:
             return
+        # Already covered as a variant of a fuller entry ('a / b' → 'X — notes').
+        for key, canon in c.execute("SELECT term, canonical FROM glossary"):
+            if term in (v.strip() for v in key.split("/")) and canon.startswith(canonical):
+                return
         c.execute("INSERT OR REPLACE INTO glossary VALUES (?, ?)", (term, canonical))
         _log_event(c, "glossary", "glossary_set", term, old=old["canonical"] if old else None,
                    new=canonical, source=source)

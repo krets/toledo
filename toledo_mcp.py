@@ -1626,7 +1626,11 @@ project names, and terms that don't clearly match a glossary entry or an existin
 task/project name. Collect every ambiguous term into ONE batched round of clarifying \
 questions — never one at a time. For each term the user resolves, record an update_glossary \
 change (term → canonical form) for step 4 so it is never asked about again. The glossary is \
-healed via that tool, not by editing this prompt.
+healed via that tool, not by editing this prompt. This round happens right after the exit \
+phrase and before any write: ask about every unrecognized proper noun, name spelling, or place, \
+never skipping it because the dump seemed clear. When adding an alias to an existing entry, \
+keep its canonical form and description and add only the new variant. Store only facts the \
+user stated, nothing inferred or time-bound.
 
 3. Cross-reference what the user mentioned against the active tasks in the snapshot. Where it's ambiguous whether something is done, still in \
 progress, or abandoned, batch those into one more round of status questions.
@@ -1647,8 +1651,9 @@ explanation that follows it). raw is otherwise the user's dump exactly as they g
 cleaned up. summary is your revised write-up in Markdown: what happened, decisions and ideas \
 worth keeping, and the task changes this session made. Leave the title empty unless the day \
 has an obvious theme, and leave the date to default to today. The save result flags glossary \
-terms left in the entry; correct them with update_journal. If a change in step 4 failed, \
-likewise fix the summary with update_journal after dealing with the failure. Do not render \
+terms left in the entry. Apply every correction to raw and summary before the first \
+add_journal so the warning comes back clean; if it still appears, test the cause rather than \
+dismissing it, then correct with update_journal. If a change in step 4 failed, likewise fix the summary with update_journal after dealing with the failure. Do not render \
 the journal as an artifact unless the user asks; it lives in Toledo.
 
 6. Close by surfacing a short next-day priority list: the snapshot with this session's \
@@ -1817,7 +1822,9 @@ in the same apply_changes call as any pending writes (add_journal last), before 
 flag. This is not the evening dump: keep it brief and capture only what the user said this \
 session about their focus and alignment for the day, plus anything outstanding that is not \
 already tracked in Toledo. Run both parts against the glossary in the snapshot, replacing every \
-misheard term with its canonical form. raw is those statements as the user gave them; summary \
+misheard term with its canonical form. If a name, spelling or place is unrecognized, ask about \
+it in one batched question before writing, and when aliasing an existing glossary entry keep its \
+canonical form and add only the new variant, storing only facts the user stated. raw is those statements as the user gave them; summary \
 is a few lines of Markdown. Set the title to "Morning focus" so it is distinguishable from the \
 evening entry, and leave the date to default to today. Skip the entry if the session produced \
 no focus or outstanding items. Mention the save only if it failed or the result flags glossary \
