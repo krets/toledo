@@ -330,6 +330,7 @@ Toledo ships guided-session prompts:
 - end_of_day_dump: end-of-day brain dump reconciled against tasks and the glossary
 - periodic_audit: infrequent deep audit of tasks, categories, and goals
 - event_review: triage and review upcoming tech events/meetups, a page at a time
+- self_diagnostic: review the session so far for prompt or tool misbehavior and propose fixes
 
 When the user asks for one of these sessions (e.g. "let's plan my day", "end of day \
 dump"), fetch its full instructions first and follow them. The fetched prompt ends with \
@@ -969,7 +970,7 @@ async def list_tools() -> list[types.Tool]:
             name="list_prompts",
             description=(
                 "List Toledo's MCP prompts (name, description) — end_of_day_dump, "
-                "morning_planning, periodic_audit, event_review. Exists for clients that only surface MCP "
+                "morning_planning, periodic_audit, event_review, self_diagnostic. Exists for clients that only surface MCP "
                 "tools, not the prompts capability; fetch a prompt's text with get_prompt."
             ),
             inputSchema={"type": "object", "properties": {}},
@@ -1709,6 +1710,42 @@ execute. Speak only in response to what they say, apart from the opening triage 
 the first batch.
 """
 
+SELF_DIAGNOSTIC_PROMPT = """\
+You are running Toledo's self diagnostic ("self diagnostic" / "review this session").
+
+Purpose: evaluate the conversation so far, find where a Toledo prompt or MCP tool did not \
+behave as intended, and propose fixes. Do not change anything in Toledo until the user approves.
+
+1. Identify the prompt or workflow under review (for example end_of_day_dump, \
+morning_planning). Fetch its text with get_prompt so you compare behavior against the actual \
+instructions, not memory.
+
+2. Scan the conversation for issues:
+   - Steps skipped, reordered, or done twice.
+   - Tool calls that failed, returned warnings, or were misused (wrong arguments, redundant \
+writes, overwritten data).
+   - Questions asked that the prompt forbade, or questions that should have been asked and \
+were not.
+   - User corrections, repeated clarifications, or deleted/recreated items.
+   - Facts stored that the user did not state (inferred or time-bound).
+   - Warnings or errors dismissed without verifying the cause.
+
+3. For each issue, decide the cause: (a) the base prompt was ambiguous, missing, or \
+contradictory; (b) the prompt was clear and was not followed; (c) an MCP tool behaved \
+unexpectedly or its description was misleading. State which, and quote the relevant prompt \
+line if one exists.
+
+4. Present a numbered list of proposed fixes. Each item: the issue, the cause category, and \
+the concrete change (exact replacement prompt wording, a tool description change, or a code \
+change). One line of wording per fix where possible. No preamble, no praise, no follow-up \
+questions.
+
+5. Wait for the user to select items ("all", "1,3", "none"). For each approved item, create \
+one Toledo task: project Projects, tag toledo (existing tag only), description containing the \
+issue, cause, and exact proposed change. Create them in one apply_changes call, then list the \
+created task names. Create nothing for unapproved items.
+"""
+
 MORNING_PLANNING_PROMPT = """\
 You are running Toledo's morning planning session ("what should I work on"). Its job is to \
 support the user's own planning, not to interview them or steer them.
@@ -1862,6 +1899,14 @@ async def list_prompts() -> list[types.Prompt]:
             ),
         ),
         types.Prompt(
+            name="self_diagnostic",
+            description=(
+                "Review the session so far for places a Toledo prompt or MCP tool misbehaved, "
+                "propose fixes, and file approved ones as Toledo tasks. "
+                "Trigger phrases: 'self diagnostic', 'review this session'."
+            ),
+        ),
+        types.Prompt(
             name="periodic_audit",
             description=(
                 "Periodic (3-6 month) deep audit: prune stale tasks, refine categories, "
@@ -1878,11 +1923,14 @@ async def get_prompt(name: str, arguments: dict[str, str] | None) -> types.GetPr
         "morning_planning":  MORNING_PLANNING_PROMPT,
         "periodic_audit":    PERIODIC_AUDIT_PROMPT,
         "event_review":      EVENT_REVIEW_PROMPT,
+        "self_diagnostic":   SELF_DIAGNOSTIC_PROMPT,
     }
     if name not in prompts:
         raise ValueError(f"Unknown prompt: {name}")
     if name == "event_review":  # no full snapshot: events and a few job tasks are all it needs
         return types.GetPromptResult(messages=[_prompt_message(prompts[name] + await _event_review_context())])
+    if name == "self_diagnostic":  # works from the conversation and get_prompt, so no snapshot
+        return types.GetPromptResult(messages=[_prompt_message(prompts[name])])
     text = prompts[name] + await _snapshot("active")
     if name == "morning_planning":
         text += _latest_journal_section()
