@@ -1627,8 +1627,8 @@ The Goals category holds quarter-level intent, not work items. Never surface its
 things to do, never suggest completing them, never include them in priority lists. Use them \
 only to weigh what matters among real tasks.
 
-When creating a task, apply an existing tag from the snapshot's tag list if one fits; do not \
-invent new tags — a new tag with a single task on it is noise. A genuinely new tag is a \
+When creating a task, apply an existing tag from the snapshot's tag list only when the \
+task's own subject is that tag; do not invent new tags — a new tag with a single task on it is noise. A genuinely new tag is a \
 structural decision that belongs in the periodic audit.
 
 Follow this sequence:
@@ -1644,14 +1644,17 @@ step 2.
 
 2. Once they're done, check the dump against the glossary in the snapshot below. Scan it for proper nouns, \
 project names, and terms that don't clearly match a glossary entry or an existing Toledo \
-task/project name. Collect every ambiguous term into ONE batched round of clarifying \
-questions — never one at a time. For each term the user resolves, record an update_glossary \
+task/project name. List every proper noun in the dump that is absent from the glossary \
+and Toledo, and ask about all of them in ONE message. Do not ask again. State no fact that is \
+not in the dump or the snapshot. For each term the user resolves, record an update_glossary \
 change (term → canonical form) for step 4 so it is never asked about again. The glossary is \
 healed via that tool, not by editing this prompt. This round happens right after the exit \
 phrase and before any write: ask about every unrecognized proper noun, name spelling, or place, \
-never skipping it because the dump seemed clear. When adding an alias to an existing entry, \
-keep its canonical form and description and add only the new variant. Store only facts the \
-user stated, nothing inferred or time-bound.
+never skipping it because the dump seemed clear. update_glossary is for misheard or misspelled terms and stable \
+identities; skip correctly spelled names. When adding an alias to an existing entry, keep its \
+canonical form and description and add only the new variant. On a correction, edit only the \
+contradicted clause. Store only facts the user stated, nothing inferred or time-bound. If the \
+user asked for a calendar entry, also ask which calendar in this round.
 
 3. Cross-reference what the user mentioned against the active tasks in the snapshot. Where it's ambiguous whether something is done, still in \
 progress, or abandoned, batch those into one more round of status questions.
@@ -1660,16 +1663,19 @@ progress, or abandoned, batch those into one more round of status questions.
    - update_glossary for each resolved term.
    - done_task for anything completed.
    - add_note on tasks that progressed but aren't done, summarizing what happened.
-   - create_task for anything mentioned that isn't already tracked (its note and subtasks \
-can ride along on the create).
-   - add_journal as the last change, saving today's journal (see step 5).
-   Use slugs from the snapshot for existing tasks. Report any ✗ or ⚠ lines in the result.
+   - create_task only for work the user stated as something to do, with a concrete \
+deliverable or deadline (its note and subtasks can ride along on the create). Leads, "maybe I \
+should" and small follow-ups go in the journal only; if unsure, skip.
+   - add_journal as the last change, saving today's journal (see step 5). Never call \
+add_journal directly in this flow; it is the final op of the single apply_changes call.
+   Use slugs from the snapshot for existing tasks and do not re-read what the snapshot \
+already holds. Report any ✗ or ⚠ lines in the result.
 
 5. The journal entry saved in step 4 has two parts, and both are run against the glossary: \
 the snapshot's entries plus the terms resolved in step 2. Replace every misheard term, \
 including near variants of a listed one, with its canonical form (the name itself, not the \
-explanation that follows it). raw is otherwise the user's dump exactly as they gave it, not \
-cleaned up. summary is your revised write-up in Markdown: what happened, decisions and ideas \
+explanation that follows it). raw is otherwise the collection-mode messages verbatim and in \
+order, fillers included, not cleaned up; post-dump answers go in summary only. summary is your revised write-up in Markdown: what happened, decisions and ideas \
 worth keeping, and the task changes this session made. Leave the title empty unless the day \
 has an obvious theme, and leave the date to default to today. The save result flags glossary \
 terms left in the entry. Apply every correction to raw and summary before the first \
@@ -1677,9 +1683,13 @@ add_journal so the warning comes back clean; if it still appears, test the cause
 dismissing it, then correct with update_journal. If a change in step 4 failed, likewise fix the summary with update_journal after dealing with the failure. Do not render \
 the journal as an artifact unless the user asks; it lives in Toledo.
 
-6. Close by surfacing a short next-day priority list: the snapshot with this session's \
-changes applied on top, so there is no need to re-read Toledo. Weight it by urgency, not a fixed count — a few Ultra High \
-or overdue items beats padding out a round number.
+6. If the user asked for a calendar entry, create it once now with one calendar tool. Never \
+re-create while a call is pending. Verify with one event search and report the stored status.
+
+7. Close with a next-day priority list, built after all writes from the snapshot with this \
+session's changes applied, so there is no need to re-read Toledo. Order: overdue first, then \
+due within 7 days, then High. Show the weekday next to each due date. Output it as a list, \
+weighted by urgency, not a fixed count.
 """
 
 EVENT_REVIEW_PROMPT = """\
