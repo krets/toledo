@@ -361,7 +361,7 @@ BATCH_OPS = {
     "create_task", "done_task", "move_task", "delete_task", "rename_task",
     "reprioritize_task", "reproject_task", "set_due", "set_recurrence", "add_note",
     "update_description", "add_subtask", "done_subtask", "delete_subtask",
-    "update_glossary", "add_project", "remove_project", "rename_project", "merge_projects",
+    "update_glossary", "remove_glossary", "add_project", "remove_project", "rename_project", "merge_projects",
     "tag_task", "untag_task", "rename_tag", "add_journal", "update_journal",
 }
 
@@ -805,6 +805,21 @@ async def list_tools() -> list[types.Tool]:
                     "into_project": {"type": "string", "description": "Project to merge into"},
                 },
                 "required": ["from_project", "into_project"],
+            },
+        ),
+        types.Tool(
+            name="remove_glossary",
+            description=(
+                "Delete a glossary entry by its exact term (as listed in the toledo://glossary "
+                "resource, e.g. 'paragard / perigard' for a combined key). Use it to drop "
+                "duplicate or wrong entries."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "term": {"type": "string", "description": "The entry's term, exactly as listed"},
+                },
+                "required": ["term"],
             },
         ),
         types.Tool(
@@ -1441,6 +1456,12 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         canonical = args["canonical"].strip()
         db.set_glossary_term(term, canonical)
         return ok(f"Glossary: '{term}' → '{canonical}'")
+
+    # ── remove_glossary ───────────────────────────────────────────────────────
+    if name == "remove_glossary":
+        term = args["term"].strip()
+        db.remove_glossary_term(term)
+        return ok(f"Glossary: removed '{term}'")
 
     # ── Journal ───────────────────────────────────────────────────────────────
     if name == "add_journal":

@@ -1475,6 +1475,18 @@ def set_glossary_term(term: str, canonical: str, source: str | None = None) -> N
                    new=canonical, source=source)
 
 
+def remove_glossary_term(term: str, source: str | None = None) -> str:
+    """Delete a glossary entry by its exact key. Returns the canonical it held."""
+    term = (term or "").strip().lower()
+    with connect() as c:
+        old = c.execute("SELECT canonical FROM glossary WHERE term = ?", (term,)).fetchone()
+        if not old:
+            raise NotFound(f"No glossary entry '{term}'")
+        c.execute("DELETE FROM glossary WHERE term = ?", (term,))
+        _log_event(c, "glossary", "glossary_removed", term, old=old["canonical"], source=source)
+        return old["canonical"]
+
+
 def glossary_hits(text: str) -> list[tuple[str, str]]:
     """Glossary terms still present in text, as (term, canonical) pairs.
     A glossary key may list variants ('paragard / perigard'). A variant that

@@ -1849,7 +1849,7 @@ const ACTIVITY_ACTIONS = {
   '':          'Any Action',
   created:     ['Created', 'created,subtask_created,project_created,journal_added'],
   completed:   ['Completed', 'state_changed,completed,completed_recurring,done_recurring,subtask_completed,subtask_reopened,recurring_cancelled'],
-  deleted:     ['Deleted', 'deleted,subtask_deleted,project_removed,journal_deleted'],
+  deleted:     ['Deleted', 'deleted,subtask_deleted,project_removed,journal_deleted,glossary_removed'],
   edited:      ['Edited', 'renamed,subtask_renamed,description_updated,note_added,note_edited,note_deleted,journal_updated,glossary_set'],
   scheduled:   ['Due & recurrence', 'due_date_set,due_set,due_cleared,recurrence_set,recurrence_cleared'],
   priority:    ['Priority', 'reprioritized'],
@@ -1913,6 +1913,7 @@ function describeEvent(action, f, scope) {
     case 'project_removed':    return 'Project removed';
     case 'project_merged':
       return `Merged into ${f.into_name || proj(f.into)} · ${f.count} task${f.count == 1 ? '' : 's'} moved`;
+    case 'glossary_removed':   return `Removed ${q(f.old)}`;
     case 'glossary_set':       return (f.old ? `${q(f.old)} → ` : '→ ') + q(f.new);
     case 'journal_added':      return 'Entry added';
     case 'journal_updated':
