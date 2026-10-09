@@ -15,6 +15,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
 <style>
 :root {
+  color-scheme: dark;
   --bg:        #0d0d0d;
   --surface:   #1a1a1a;
   --surface2:  #242424;
@@ -207,7 +208,21 @@ body.panel-open #fab{right:436px}
 .jr-raw{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .jr-search{padding:8px 12px 4px}
 .jr-filters{display:flex;gap:8px;align-items:center;padding:4px 12px 8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
-.jr-filters input[type=date]{width:auto;flex:0 1 140px}
+.jr-filters input[type=date]{
+  width:auto;flex:0 1 140px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);
+  padding:6px 9px;color:var(--text);font-size:13px;font-family:inherit;outline:none;color-scheme:dark;
+}
+.jr-filters input[type=date]:focus{border-color:var(--accent)}
+.kebab-wrap{margin-left:auto;position:relative}
+.kebab-btn{background:none;border:1px solid transparent;color:var(--muted);cursor:pointer;font-size:20px;line-height:1;padding:2px 8px;border-radius:6px}
+.kebab-btn:hover{background:var(--surface2);color:var(--text)}
+.kebab-menu{
+  position:absolute;right:0;top:calc(100% + 4px);min-width:180px;z-index:20;display:none;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r);box-shadow:0 8px 24px rgba(0,0,0,.6);overflow:hidden;
+}
+.kebab-menu.open{display:block}
+.kebab-item{padding:10px 14px;font-size:13px;cursor:pointer}
+.kebab-item:hover{background:var(--surface2)}
 .jr-pane{display:flex;gap:6px;padding:10px 14px 0}
 .gl-term{font-size:14px;font-weight:600;overflow-wrap:anywhere}
 .gl-canon{font-size:13px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
@@ -1732,6 +1747,8 @@ App.clearSettingsKey = async function() {
   } catch(e) { App.toast('✗ ' + e.message, 4000); }
 };
 
+document.addEventListener('click', () => document.querySelectorAll('.kebab-menu.open').forEach(m => m.classList.remove('open')));
+
 // ── Journal view ──────────────────────────────────────────────────────────────
 App.loadJournal = async function() {
   try {
@@ -1830,6 +1847,10 @@ App.renderJournalPanel = function() {
   $('panel-body').innerHTML = `<div class="jr-pane">
       <button class="filter-btn${pane === 'summary' ? ' active' : ''}" onclick="App.setJournalPane('summary')">Markdown</button>
       <button class="filter-btn${pane === 'raw' ? ' active' : ''}" onclick="App.setJournalPane('raw')">Raw</button>
+      ${pane === 'raw' ? `<div class="kebab-wrap">
+        <button class="kebab-btn" title="More" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">⋮</button>
+        <div class="kebab-menu"><div class="kebab-item" onclick="App.summarizeEntry()">✨ ${j.summary.trim() ? 'Regenerate' : 'Generate'} summary with AI</div></div>
+      </div>` : ''}
     </div>
     <div class="psec" style="border-bottom:none"><div class="psec-body">${body}</div></div>`;
 };
@@ -1871,6 +1892,25 @@ App.setJournalDate = async function(key, v) {
   App[key] = v;
   await App.loadJournal();
   App.renderMain();
+};
+
+App.summarizeEntry = async function() {
+  const j = App.journal;
+  document.querySelectorAll('.kebab-menu').forEach(m => m.classList.remove('open'));
+  if (!j || !j.raw.trim()) { App.toast('No raw text to summarize'); return; }
+  if (j.summary.trim() && !confirm('Replace the existing summary?')) return;
+  App.toast('Summarizing…');
+  try {
+    const r = await api('POST', '/api/journal/summarize', { raw: j.raw });
+    const body = { summary: r.summary };
+    if (r.title && !j.title) body.title = r.title;
+    App.journal = await api('PATCH', '/api/journal/' + j.id, body);
+    App.journalPane = 'summary';
+    App.renderJournalPanel();
+    await App.loadJournal();
+    App.renderMain();
+    App.toast(r.glossary_left.length ? '⚠ Glossary terms left: ' + r.glossary_left.join('; ') : '✓ Summary generated');
+  } catch(e) { App.toast('✗ ' + e.message); }
 };
 
 App.setJournalPane = function(p) {
