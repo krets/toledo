@@ -404,18 +404,15 @@ def list_journal():
                                    query=a.get("q"), since=a.get("since"), until=a.get("until")))
 
 
-@app.route("/api/journal/summarize", methods=["POST"])
-def summarize_journal():
-    """Draft a title and Markdown summary of a raw dump with the configured LLM,
-    run against the glossary. Nothing is saved; the form decides what to keep."""
+class SummarizeFailed(db.ToledoError):
+    status = 502
+
+
+def draft_summary(raw: str) -> dict:
+    """Title and Markdown summary of a raw dump from the configured LLM, run
+    against the glossary. Saves nothing."""
     from litellm import completion
 
-    data, err, code = require_json("raw")
-    if err:
-        return err, code
-    raw = (data["raw"] or "").strip()
-    if not raw:
-        return jsonify({"error": "raw is required"}), 400
     model, api_key, api_base = resolve_llm(db.load_config().get("llm", {}))
     glossary = db.load_glossary()
     glossary_text = "\n".join(f"{t} → {c}" for t, c in sorted(glossary.items())) or "(empty)"
@@ -424,14 +421,36 @@ def summarize_journal():
                           messages=[{"role": "system", "content": JOURNAL_SUMMARY_PROMPT.format(glossary=glossary_text)},
                                     {"role": "user", "content": raw}])
     except Exception as e:
-        return jsonify({"error": f"Summarize failed: {e}"}), 502
+        raise SummarizeFailed(f"Summarize failed: {e}")
     text = (resp.choices[0].message.content or "").strip()
     title, summary = "", text
     if text.startswith("TITLE:"):
         first, _, rest = text.partition("\n")
         title, summary = first[len("TITLE:"):].strip(), rest.strip()
     leftover = [f"{t} → {c}" for t, c in db.glossary_hits(f"{title}\n{summary}")]
-    return jsonify({"title": title, "summary": summary, "glossary_left": leftover})
+    return {"title": title, "summary": summary, "glossary_left": leftover}
+
+
+@app.route("/api/journal/summarize", methods=["POST"])
+def summarize_journal():
+    """Draft a summary without saving; the caller decides what to keep."""
+    data, err, code = require_json("raw")
+    if err:
+        return err, code
+    return jsonify(draft_summary(data["raw"].strip()))
+
+
+def summarize_into(entry: dict) -> dict:
+    """Generate a summary for a saved entry and store it. A failed summary
+    leaves the entry as saved and reports the error beside it."""
+    try:
+        draft = draft_summary(entry["raw"])
+    except SummarizeFailed as e:
+        return {**entry, "summary_error": str(e)}
+    fields = {"summary": draft["summary"]}
+    if draft["title"] and not entry["title"]:
+        fields["title"] = draft["title"]
+    return {**db.update_journal(entry["id"], source="web", **fields), "glossary_left": draft["glossary_left"]}
 
 
 @app.route("/api/journal/<int:entry_id>", methods=["GET"])
@@ -444,14 +463,19 @@ def add_journal():
     data = request.json or {}
     j = db.add_journal(data.get("raw"), summary=data.get("summary"), title=data.get("title"),
                        date=data.get("date"), source="web")
+    if data.get("summarize") and j["raw"].strip():
+        j = summarize_into(j)
     return jsonify(j), 201
 
 
 @app.route("/api/journal/<int:entry_id>", methods=["PATCH"])
 def update_journal(entry_id):
     data = request.json or {}
-    return jsonify(db.update_journal(entry_id, raw=data.get("raw"), summary=data.get("summary"),
-                                     title=data.get("title"), date=data.get("date")))
+    j = db.update_journal(entry_id, raw=data.get("raw"), summary=data.get("summary"),
+                          title=data.get("title"), date=data.get("date"))
+    if data.get("summarize") and j["raw"].strip():
+        j = summarize_into(j)
+    return jsonify(j)
 
 
 @app.route("/api/journal/<int:entry_id>", methods=["DELETE"])

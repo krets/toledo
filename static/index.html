@@ -213,6 +213,21 @@ body.panel-open #fab{right:436px}
   padding:6px 9px;color:var(--text);font-size:13px;font-family:inherit;outline:none;color-scheme:dark;
 }
 .jr-filters input[type=date]:focus{border-color:var(--accent)}
+.jc{display:flex;flex-direction:column;height:100%;padding:12px 14px 14px;gap:10px;max-width:900px;margin:0 auto}
+.jc-meta{display:flex;gap:10px}
+.jc-meta input{
+  background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;
+  color:var(--text);font-size:15px;font-family:inherit;outline:none;color-scheme:dark;
+}
+.jc-meta input:focus,.jc-text:focus{border-color:var(--accent)}
+.jc-title{flex:1;min-width:0}
+.jc-text{
+  flex:1;min-height:200px;resize:none;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);
+  padding:12px;color:var(--text);font-size:15px;line-height:1.6;font-family:inherit;outline:none;
+}
+.jc-status{font-size:11px;color:var(--muted);min-height:14px}
+.jc .btn-row{margin:0;flex-wrap:wrap}
+.jc .btn-row .btn{min-width:110px}
 .kebab-wrap{margin-left:auto;position:relative}
 .kebab-btn{background:none;border:1px solid transparent;color:var(--muted);cursor:pointer;font-size:20px;line-height:1;padding:2px 8px;border-radius:6px}
 .kebab-btn:hover{background:var(--surface2);color:var(--text)}
@@ -589,7 +604,7 @@ a.ev-title:hover{text-decoration:underline}
 
 <div id="main"></div>
 
-<button id="fab" onclick="App.openSheet(App.fabSheet())" title="New">+</button>
+<button id="fab" onclick="App.fabAction()" title="New">+</button>
 
 <!-- Detail panel -->
 <div id="panel">
@@ -887,6 +902,7 @@ App.filteredTasks = function() {
 App.setView = function(v) {
   // Close menus
   document.querySelectorAll('.filter-dropdown,#ham-menu').forEach(d => d.classList.remove('open'));
+  if (App.view === 'journal-compose') App.leaveCompose();
   if (App.journal && v !== 'journal') App.closePanel();
   App.view = v;
   if (v === 'settings') { App.loadSettings(); return; }
@@ -899,6 +915,7 @@ App.setView = function(v) {
 };
 
 App.goHome = function() {
+  if (App.view === 'journal-compose') { App.cancelCompose(); return; }
   if (App.journal) App.closePanel();
   App.view = 'tasks';
   App.loadTasks().then(() => App.renderMain());
@@ -910,7 +927,7 @@ App.renderMain = function() {
   const back = $('back-btn');
   $('tb-tasks').classList.toggle('active', App.view === 'tasks');
   $('tb-brief').classList.toggle('active', App.view === 'brief');
-  $('tb-journal').classList.toggle('active', App.view === 'journal');
+  $('tb-journal').classList.toggle('active', App.view === 'journal' || App.view === 'journal-compose');
   $('tb-glossary').classList.toggle('active', App.view === 'glossary');
   switch (App.view) {
     case 'tasks':
@@ -948,6 +965,11 @@ App.renderMain = function() {
       el.innerHTML = App.buildJournalView();
       fab.style.display = 'flex';
       back.style.display = 'none';
+      break;
+    case 'journal-compose':
+      el.innerHTML = App.buildCompose();
+      fab.style.display = 'none';
+      back.style.display = 'block';
       break;
     case 'glossary':
       el.innerHTML = App.buildGlossaryView();
@@ -1350,7 +1372,7 @@ document.addEventListener('keydown', e => {
     if (App.panelOpen()) App.openTask(cards[i].dataset.slug);
   } else if (e.key === 'n' && (App.view === 'tasks' || App.view === 'journal' || App.view === 'glossary')) {
     e.preventDefault();
-    App.openSheet(App.fabSheet());
+    App.fabAction();
   } else if (e.key === '/') {
     e.preventDefault();
     App.setView('search');
@@ -1837,8 +1859,7 @@ App.renderJournalPanel = function() {
   $('panel-info').innerHTML = `<h2>${esc(j.title || day)}</h2>
     ${j.title ? `<div style="font-size:13px;color:var(--muted)">${esc(day)}</div>` : ''}
     <div class="panel-meta">${pills}</div>`;
-  $('panel-actions').innerHTML = `<button class="abtn" onclick="App.openSheet('edit-journal')">✎ Edit</button>
-    <button class="abtn dng" onclick="App.deleteJournal()">🗑 Delete</button>`;
+  $('panel-actions').innerHTML = `<button class="abtn dng" onclick="App.deleteJournal()">🗑 Delete</button>`;
 
   const pane = App.journalPane;
   const body = pane === 'raw'
@@ -1847,10 +1868,13 @@ App.renderJournalPanel = function() {
   $('panel-body').innerHTML = `<div class="jr-pane">
       <button class="filter-btn${pane === 'summary' ? ' active' : ''}" onclick="App.setJournalPane('summary')">Markdown</button>
       <button class="filter-btn${pane === 'raw' ? ' active' : ''}" onclick="App.setJournalPane('raw')">Raw</button>
-      ${pane === 'raw' ? `<div class="kebab-wrap">
+      <div class="kebab-wrap">
         <button class="kebab-btn" title="More" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">⋮</button>
-        <div class="kebab-menu"><div class="kebab-item" onclick="App.summarizeEntry()">✨ ${j.summary.trim() ? 'Regenerate' : 'Generate'} summary with AI</div></div>
-      </div>` : ''}
+        <div class="kebab-menu">
+          <div class="kebab-item" onclick="App.editJournal()">✎ Edit entry</div>
+          <div class="kebab-item" onclick="App.summarizeEntry()">✨ ${j.summary.trim() ? 'Regenerate' : 'Generate'} summary with AI</div>
+        </div>
+      </div>
     </div>
     <div class="psec" style="border-bottom:none"><div class="psec-body">${body}</div></div>`;
 };
@@ -1867,25 +1891,141 @@ App.deleteJournal = async function() {
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
-App.submitJournal = async function() {
-  const body = {
-    date:    $('f-jdate')?.value || null,
-    title:   $('f-jtitle')?.value.trim() || '',
-    summary: $('f-jsummary')?.value || '',
-    raw:     $('f-jraw')?.value || '',
-  };
-  if (!body.raw.trim() && !body.summary.trim()) { App.toast('Write something first'); return; }
-  const editing = App.sheetType === 'edit-journal' && App.journal;
+// ── Journal compose / edit (full page) ───────────────────────────────────────
+// A new entry keeps one draft per browser in localStorage (title, date, text),
+// saved on a timer, on every pause in typing and when the page is hidden.
+const DRAFT_KEY = 'toledo.journalDraft';
+const todayStr = () => new Date().toLocaleDateString('en-CA');
+
+function readDraft() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || null; } catch(e) { return null; }
+}
+
+App.composeJournal = function() {
+  App._compose = null;
+  App.openCompose();
+};
+
+App.editJournal = function() {
+  document.querySelectorAll('.kebab-menu').forEach(m => m.classList.remove('open'));
+  if (!App.journal) return;
+  App._compose = { id: App.journal.id, date: App.journal.date, title: App.journal.title, raw: App.journal.raw, hasSummary: !!App.journal.summary.trim() };
+  App.openCompose();
+};
+
+App.openCompose = function() {
+  if (App.journal) App.closePanel();
+  App.view = 'journal-compose';
+  App.renderMain();
+  App.startDraftTimer();
+  setTimeout(() => $('jc-text')?.focus(), 50);
+};
+
+App.buildCompose = function() {
+  const editing = App._compose;
+  const d = editing || readDraft() || {};
+  const status = editing ? 'Editing an existing entry' : (d.raw || d.title ? 'Draft restored from this browser' : '');
+  return `<div class="jc">
+    <div class="jc-meta">
+      <input id="jc-title" class="jc-title" type="text" placeholder="Title (optional)" autocomplete="off" value="${esc(d.title || '')}" oninput="App.draftChanged()">
+      <input id="jc-date" type="date" value="${esc(d.date || todayStr())}" onchange="App.draftChanged()">
+    </div>
+    <textarea id="jc-text" class="jc-text" placeholder="Write the dump as it comes out…" oninput="App.draftChanged()">${esc(d.raw || '')}</textarea>
+    <div class="jc-status" id="jc-status">${esc(status)}</div>
+    <div class="btn-row">
+      <button class="btn btn-s" onclick="App.cancelCompose()">Cancel</button>
+      ${editing ? '' : '<button class="btn btn-s" onclick="App.clearDraft()">Clear</button>'}
+      <button class="btn btn-s" id="jc-save" onclick="App.submitCompose(false)">Save</button>
+      <button class="btn btn-p" id="jc-sum" onclick="App.submitCompose(true)">${editing && editing.hasSummary ? 'Save &amp; re-summarize' : 'Save &amp; summarize'}</button>
+    </div>
+  </div>`;
+};
+
+App.composeValues = () => ({
+  title: $('jc-title')?.value.trim() || '',
+  date:  $('jc-date')?.value || todayStr(),
+  raw:   $('jc-text')?.value || '',
+});
+
+App.saveDraft = function() {
+  if (App.view !== 'journal-compose' || App._compose || !$('jc-text')) return;
+  const v = App.composeValues();
   try {
+    if (!v.raw.trim() && !v.title) localStorage.removeItem(DRAFT_KEY);
+    else localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...v, savedAt: Date.now() }));
+    const st = $('jc-status');
+    if (st) st.textContent = 'Draft saved ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch(e) { /* storage full or blocked: the text stays in the page */ }
+};
+
+App.draftChanged = function() {
+  clearTimeout(App._draftDebounce);
+  App._draftDebounce = setTimeout(App.saveDraft, 1500);
+};
+
+App.startDraftTimer = function() {
+  clearInterval(App._draftTimer);
+  App._draftTimer = setInterval(App.saveDraft, 10000);
+};
+
+App.leaveCompose = function() {
+  App.saveDraft();
+  clearInterval(App._draftTimer);
+  clearTimeout(App._draftDebounce);
+};
+
+window.addEventListener('pagehide', () => App.saveDraft());
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') App.saveDraft(); });
+
+App.cancelCompose = function() {
+  const editing = App._compose;
+  App.leaveCompose();
+  App.view = 'journal';
+  App.loadJournal().then(() => {
+    App.renderMain();
+    if (editing) App.openJournal(editing.id);
+  });
+};
+
+App.clearDraft = function() {
+  const v = App.composeValues();
+  if ((v.raw.trim() || v.title) && !confirm('Clear the title and text? The draft will be deleted.')) return;
+  try { localStorage.removeItem(DRAFT_KEY); } catch(e) {}
+  $('jc-title').value = ''; $('jc-text').value = ''; $('jc-date').value = todayStr();
+  $('jc-status').textContent = 'Draft cleared';
+  $('jc-text').focus();
+};
+
+App.submitCompose = async function(summarize) {
+  const v = App.composeValues();
+  if (!v.raw.trim()) { App.toast('Write something first'); return; }
+  const editing = App._compose;
+  if (summarize && editing && editing.hasSummary && !confirm('Replace the existing summary?')) return;
+  const btns = ['jc-save', 'jc-sum'].map($);
+  btns.forEach(b => b.disabled = true);
+  if (summarize) $('jc-sum').textContent = 'Summarizing…';
+  try {
+    const body = { ...v, summarize };
     const j = editing
-      ? await api('PATCH', '/api/journal/' + App.journal.id, body)
+      ? await api('PATCH', '/api/journal/' + editing.id, body)
       : await api('POST', '/api/journal', body);
-    App.closeSheet();
-    App.toast(editing ? '✓ Entry updated' : '✓ Entry saved');
+    clearInterval(App._draftTimer);
+    clearTimeout(App._draftDebounce);
+    if (!editing) { try { localStorage.removeItem(DRAFT_KEY); } catch(e) {} }
+    App._compose = null;
+    App.view = 'journal';
     await App.loadJournal();
     App.renderMain();
-    App.openJournal(j.id);
-  } catch(e) { App.toast('✗ ' + e.message); }
+    App.journalPane = summarize && !j.summary_error ? 'summary' : 'raw';
+    await App.openJournal(j.id);
+    if (j.summary_error) App.toast('✗ Saved, but ' + j.summary_error);
+    else if (j.glossary_left && j.glossary_left.length) App.toast('⚠ Glossary terms left: ' + j.glossary_left.join('; '));
+    else App.toast(summarize ? '✓ Saved with summary' : '✓ Entry saved');
+  } catch(e) {
+    App.toast('✗ ' + e.message);
+    btns.forEach(b => b.disabled = false);
+    $('jc-sum').textContent = editing && editing.hasSummary ? 'Save & re-summarize' : 'Save & summarize';
+  }
 };
 
 App.setJournalDate = async function(key, v) {
@@ -1918,20 +2058,10 @@ App.setJournalPane = function(p) {
   App.renderJournalPanel();
 };
 
-App.fabSheet = () => (App._glossaryEdit = null, App.view === 'journal' ? 'new-journal' : App.view === 'glossary' ? 'glossary-entry' : 'new-task');
-
-App.summarizeJournal = async function() {
-  const raw = $('f-jraw')?.value || '';
-  if (!raw.trim()) { App.toast('Add the raw text first'); return; }
-  const btn = $('f-jsum-btn');
-  btn.disabled = true; btn.textContent = 'Summarizing…';
-  try {
-    const r = await api('POST', '/api/journal/summarize', { raw });
-    $('f-jsummary').value = r.summary;
-    if (r.title && !$('f-jtitle').value.trim()) $('f-jtitle').value = r.title;
-    App.toast(r.glossary_left.length ? '⚠ Glossary terms left: ' + r.glossary_left.join('; ') : '✓ Summary drafted');
-  } catch(e) { App.toast('✗ ' + e.message); }
-  btn.disabled = false; btn.textContent = '✨ Summarize with AI';
+App.fabAction = function() {
+  if (App.view === 'journal') return App.composeJournal();
+  App._glossaryEdit = null;
+  App.openSheet(App.view === 'glossary' ? 'glossary-entry' : 'new-task');
 };
 
 // ── Glossary view ─────────────────────────────────────────────────────────────
@@ -2636,14 +2766,6 @@ App.openSheet = function(type) {
           <button class="btn btn-p" onclick="App.submitRenameSubtask()">Rename</button>
         </div>`,
     },
-    'new-journal': {
-      title: 'New journal entry',
-      body: () => App.journalForm({ date: new Date().toLocaleDateString('en-CA'), title: '', summary: '', raw: '' }),
-    },
-    'edit-journal': {
-      title: 'Edit journal entry',
-      body: () => App.journalForm(App.journal || {}),
-    },
     'glossary-entry': {
       title: App._glossaryEdit ? 'Edit glossary entry' : 'New glossary entry',
       body: () => {
@@ -2687,20 +2809,6 @@ App.openSheet = function(type) {
   setTimeout(() => { const f = $('sheet-body').querySelector('input:not([disabled]):not([type=color]),textarea'); if (f) f.focus(); }, 280);
   // Refresh with a live read in case the cached check is stale or hasn't run yet.
   if (type === 'about') App.checkVersion().then(() => { if (App.sheetType === 'about') $('sheet-body').innerHTML = App.aboutBody(); });
-};
-
-App.journalForm = function(j) {
-  return `
-    <div class="frow">
-      <div class="fg"><label>Date</label><input id="f-jdate" type="date" value="${esc(j.date || '')}"></div>
-      <div class="fg"><label>Title</label><input id="f-jtitle" type="text" value="${esc(j.title || '')}" autocomplete="off" placeholder="Optional"></div>
-    </div>
-    <div class="fg"><label>Raw</label><textarea id="f-jraw" rows="8" placeholder="The dump, as it came out…">${esc(j.raw || '')}</textarea></div>
-    <div class="fg"><label>Summary (Markdown) <button type="button" class="abtn" id="f-jsum-btn" style="margin-left:8px" onclick="App.summarizeJournal()">✨ Summarize with AI</button></label><textarea id="f-jsummary" rows="8" placeholder="Revised version…">${esc(j.summary || '')}</textarea></div>
-    <div class="btn-row">
-      <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
-      <button class="btn btn-p" onclick="App.submitJournal()">Save</button>
-    </div>`;
 };
 
 App.closeSheet = function() {
