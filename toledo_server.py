@@ -813,7 +813,11 @@ Rules:
 - The first line of your reply is "TITLE: <short title>" when the day has an obvious theme, \
 or exactly "TITLE:" when it does not. Everything after that line is the summary.
 - The summary covers what happened, decisions and ideas worth keeping, and open follow-ups. \
-Use short Markdown paragraphs or bullets. State nothing that is not in the dump.
+State nothing that is not in the dump: do not add dates, deadlines, times or reasons the user \
+did not give, and do not attribute an idea, decision or request to anyone but the user unless \
+the dump says so. A time such as "tomorrow" or "Friday" applies only to the item it was said about.
+- Format as Markdown with a short bold or heading label per topic and compact bullet lists: \
+one line per bullet, no blank lines between bullets.
 - The dump may contain misheard words from dictation. Replace every misheard term, \
 including near variants of a listed one, with its canonical form from the glossary below \
 (the name itself, not the explanation after it). Never invent glossary entries.

@@ -238,6 +238,10 @@ body.panel-open #fab{right:436px}
 .kebab-menu.open{display:block}
 .kebab-item{padding:10px 14px;font-size:13px;cursor:pointer}
 .kebab-item:hover{background:var(--surface2)}
+.kebab-item.disabled{color:var(--muted);cursor:default;pointer-events:none}
+.jr-busy{display:flex;align-items:center;gap:10px;margin:10px 14px 0;padding:9px 12px;border-radius:var(--r);background:var(--accent-dim);color:var(--accent-text);font-size:13px}
+.spinner{width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
 .jr-pane{display:flex;gap:6px;padding:10px 14px 0}
 .gl-term{font-size:14px;font-weight:600;overflow-wrap:anywhere}
 .gl-canon{font-size:13px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
@@ -1862,6 +1866,7 @@ App.renderJournalPanel = function() {
   $('panel-actions').innerHTML = `<button class="abtn dng" onclick="App.deleteJournal()">🗑 Delete</button>`;
 
   const pane = App.journalPane;
+  const busy = App._summarizing.has(j.id);
   const body = pane === 'raw'
     ? (j.raw.trim() ? `<div class="jr-raw">${esc(j.raw)}</div>` : `<p class="md-empty">No raw text.</p>`)
     : (j.summary.trim() ? `<div class="md">${mdToHtml(j.summary)}</div>` : `<p class="md-empty">No summary yet.</p>`);
@@ -1872,10 +1877,11 @@ App.renderJournalPanel = function() {
         <button class="kebab-btn" title="More" onclick="event.stopPropagation(); this.nextElementSibling.classList.toggle('open')">⋮</button>
         <div class="kebab-menu">
           <div class="kebab-item" onclick="App.editJournal()">✎ Edit entry</div>
-          <div class="kebab-item" onclick="App.summarizeEntry()">✨ ${j.summary.trim() ? 'Regenerate' : 'Generate'} summary with AI</div>
+          <div class="kebab-item${busy ? ' disabled' : ''}" onclick="App.summarizeEntry()">${busy ? 'Summarizing…' : `✨ ${j.summary.trim() ? 'Regenerate' : 'Generate'} summary with AI`}</div>
         </div>
       </div>
     </div>
+    ${busy ? '<div class="jr-busy"><span class="spinner"></span>Generating summary… this can take up to a minute.</div>' : ''}
     <div class="psec" style="border-bottom:none"><div class="psec-body">${body}</div></div>`;
 };
 
@@ -2034,23 +2040,35 @@ App.setJournalDate = async function(key, v) {
   App.renderMain();
 };
 
+App._summarizing = new Set();
+
 App.summarizeEntry = async function() {
   const j = App.journal;
   document.querySelectorAll('.kebab-menu').forEach(m => m.classList.remove('open'));
-  if (!j || !j.raw.trim()) { App.toast('No raw text to summarize'); return; }
+  if (!j || App._summarizing.has(j.id)) return;
+  if (!j.raw.trim()) { App.toast('No raw text to summarize'); return; }
   if (j.summary.trim() && !confirm('Replace the existing summary?')) return;
-  App.toast('Summarizing…');
+  App._summarizing.add(j.id);
+  App.renderJournalPanel();
   try {
     const r = await api('POST', '/api/journal/summarize', { raw: j.raw });
     const body = { summary: r.summary };
     if (r.title && !j.title) body.title = r.title;
-    App.journal = await api('PATCH', '/api/journal/' + j.id, body);
-    App.journalPane = 'summary';
-    App.renderJournalPanel();
+    const updated = await api('PATCH', '/api/journal/' + j.id, body);
+    App._summarizing.delete(j.id);
+    if (App.journal && App.journal.id === j.id) {
+      App.journal = updated;
+      App.journalPane = 'summary';
+      App.renderJournalPanel();
+    }
     await App.loadJournal();
-    App.renderMain();
+    if (App.view === 'journal') App.renderMain();
     App.toast(r.glossary_left.length ? '⚠ Glossary terms left: ' + r.glossary_left.join('; ') : '✓ Summary generated');
-  } catch(e) { App.toast('✗ ' + e.message); }
+  } catch(e) {
+    App._summarizing.delete(j.id);
+    if (App.journal && App.journal.id === j.id) App.renderJournalPanel();
+    App.toast('✗ ' + e.message);
+  }
 };
 
 App.setJournalPane = function(p) {
