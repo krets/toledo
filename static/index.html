@@ -243,10 +243,13 @@ body.panel-open #fab{right:436px}
 .spinner{width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
 @keyframes spin{to{transform:rotate(360deg)}}
 .jr-pane{display:flex;gap:6px;padding:10px 14px 0}
-.gl-term{font-size:14px;font-weight:600;overflow-wrap:anywhere}
-.gl-canon{font-size:13px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
-.gl-row{display:flex;gap:8px;align-items:flex-start}
-.gl-row>div:first-child{flex:1;min-width:0}
+.gl-head{display:flex;gap:8px;align-items:center}
+.gl-name{flex:1;min-width:0;font-size:16px;font-weight:700;overflow-wrap:anywhere}
+.gl-notes{font-size:13px;line-height:1.5;margin-top:4px;overflow-wrap:anywhere}
+.gl-notes.none{color:var(--muted);font-style:italic}
+.gl-variants{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0 0 14px;padding-left:10px;border-left:2px solid var(--border)}
+.gl-vlabel{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.gl-chip{font-size:12px;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:1px 9px}
 
 /* ── Activity ── */
 .act-row{display:flex;gap:10px;padding:7px 14px;border-bottom:1px solid var(--border);font-size:13px;align-items:baseline}
@@ -2090,17 +2093,22 @@ App.loadGlossary = async function() {
 
 App.buildGlossaryView = function() {
   const q = App.glossaryQuery.trim().toLowerCase();
-  const rows = App.glossary.filter(g => !q || g.term.includes(q) || g.canonical.toLowerCase().includes(q));
+  const rows = App.glossary.filter(g => !q || g.name.toLowerCase().includes(q) || g.notes.toLowerCase().includes(q) ||
+    g.variants.some(v => v.toLowerCase().includes(q)));
   let html = `<div class="view-header">Glossary</div>
-    <div class="jr-search"><input id="search-input" type="search" placeholder="Filter terms…"
+    <div class="jr-search"><input id="search-input" type="search" placeholder="Filter names, facts or variants…"
       value="${esc(App.glossaryQuery)}" oninput="App.onGlossarySearch(this.value)" autocomplete="off"></div>`;
-  if (!rows.length) return html + `<div class="empty"><div class="empty-icon">📖</div><p>${q ? 'No terms match' : 'No glossary entries yet'}</p></div>`;
-  rows.forEach((g, i) => {
-    html += `<div class="card"><div class="gl-row">
-      <div><div class="gl-term">${esc(g.term)}</div><div class="gl-canon">→ ${esc(g.canonical)}</div></div>
-      <button class="abtn" onclick="App.editGlossary(${App.glossary.indexOf(g)})">✎ Edit</button>
-      <button class="abtn dng" onclick="App.deleteGlossary(${App.glossary.indexOf(g)})">🗑</button>
-    </div></div>`;
+  if (!rows.length) return html + `<div class="empty"><div class="empty-icon">📖</div><p>${q ? 'No entries match' : 'No glossary entries yet'}</p></div>`;
+  rows.forEach(g => {
+    html += `<div class="card">
+      <div class="gl-head">
+        <span class="gl-name">${esc(g.name)}</span>
+        <button class="abtn" onclick="App.editGlossary(${g.id})">✎ Edit</button>
+        <button class="abtn dng" onclick="App.deleteGlossary(${g.id})">🗑</button>
+      </div>
+      <div class="gl-notes${g.notes ? '' : ' none'}">${g.notes ? esc(g.notes) : 'No notes'}</div>
+      ${g.variants.length ? `<div class="gl-variants"><span class="gl-vlabel">Also heard as</span>${g.variants.map(v => `<span class="gl-chip">${esc(v)}</span>`).join('')}</div>` : ''}
+    </div>`;
   });
   return html;
 };
@@ -2112,13 +2120,13 @@ App.onGlossarySearch = function(q) {
   if (inp) { inp.focus(); inp.setSelectionRange(q.length, q.length); }
 };
 
-App.editGlossary = function(i) { App._glossaryEdit = App.glossary[i]; App.openSheet('glossary-entry'); };
+App.editGlossary = function(id) { App._glossaryEdit = App.glossary.find(g => g.id === id) || null; App.openSheet('glossary-entry'); };
 
-App.deleteGlossary = async function(i) {
-  const g = App.glossary[i];
-  if (!g || !confirm(`Delete glossary entry "${g.term}"?`)) return;
+App.deleteGlossary = async function(id) {
+  const g = App.glossary.find(x => x.id === id);
+  if (!g || !confirm(`Delete "${g.name}" and its ${g.variants.length} variant${g.variants.length === 1 ? '' : 's'}?`)) return;
   try {
-    await api('POST', '/api/glossary/delete', { term: g.term });
+    await api('DELETE', '/api/glossary/' + id);
     App.toast('Deleted');
     await App.loadGlossary();
     App.renderMain();
@@ -2126,12 +2134,14 @@ App.deleteGlossary = async function(i) {
 };
 
 App.submitGlossary = async function() {
-  const term = $('f-gterm')?.value.trim(), canonical = $('f-gcanon')?.value.trim();
-  if (!term || !canonical) { App.toast('Term and canonical form are required'); return; }
+  const name = $('f-gname')?.value.trim();
+  if (!name) { App.toast('Name is required'); return; }
+  const body = { name, notes: $('f-gnotes')?.value.trim() || '',
+    variants: ($('f-gvariants')?.value || '').split('\n').map(v => v.trim()).filter(Boolean) };
   const old = App._glossaryEdit;
   try {
-    if (old && old.term !== term.toLowerCase()) await api('POST', '/api/glossary/delete', { term: old.term });
-    await api('POST', '/api/glossary', { term, canonical });
+    if (old) await api('PUT', '/api/glossary/' + old.id, body);
+    else await api('POST', '/api/glossary', body);
     App._glossaryEdit = null;
     App.closeSheet();
     App.toast('✓ Saved');
@@ -2787,10 +2797,11 @@ App.openSheet = function(type) {
     'glossary-entry': {
       title: App._glossaryEdit ? 'Edit glossary entry' : 'New glossary entry',
       body: () => {
-        const g = App._glossaryEdit || { term: '', canonical: '' };
+        const g = App._glossaryEdit || { name: '', notes: '', variants: [] };
         return `
-        <div class="fg"><label>Term (as misheard; variants as "a / b")</label><input id="f-gterm" type="text" value="${esc(g.term)}" autocomplete="off"></div>
-        <div class="fg"><label>Canonical form</label><textarea id="f-gcanon" rows="3">${esc(g.canonical)}</textarea></div>
+        <div class="fg"><label>Name (the correct form)</label><input id="f-gname" type="text" value="${esc(g.name)}" autocomplete="off"></div>
+        <div class="fg"><label>Facts about it</label><textarea id="f-gnotes" rows="3" placeholder="Who or what it is">${esc(g.notes)}</textarea></div>
+        <div class="fg"><label>Also heard as (one per line)</label><textarea id="f-gvariants" rows="3" placeholder="Misheard or misspelled forms">${esc(g.variants.join('\n'))}</textarea></div>
         <div class="btn-row">
           <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
           <button class="btn btn-p" onclick="App.submitGlossary()">Save</button>

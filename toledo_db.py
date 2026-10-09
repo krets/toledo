@@ -38,7 +38,7 @@ DEFAULT_PRIORITY = 50
 # Schema 3 repoints tasks whose project was stored as an unregistered string.
 # Schema 4 turns activity into a global event log (see the table below).
 # Schema 5 adds task tags.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -119,10 +119,22 @@ CREATE TABLE IF NOT EXISTS description_history (
     text    TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS glossary (
-    term      TEXT PRIMARY KEY,
-    canonical TEXT NOT NULL
+-- A fact about a name (a person, client, place, project) and the ways it
+-- gets misheard. The entry keeps its id however it is renamed or edited.
+CREATE TABLE IF NOT EXISTS glossary_entry (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
+
+-- Heard-as spellings that should be read as the entry's name.
+CREATE TABLE IF NOT EXISTS glossary_variant (
+    variant  TEXT PRIMARY KEY COLLATE NOCASE,
+    entry_id INTEGER NOT NULL REFERENCES glossary_entry(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS glossary_variant_entry ON glossary_variant(entry_id);
 
 -- Journal entries: the raw dump as given and its revised summary. entry_date
 -- is the submission date unless the entry was backfilled for another day.
@@ -194,7 +206,9 @@ def _init(conn: sqlite3.Connection, path: Path) -> None:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    if row and int(row[0]) < 4:
+    old_glossary = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'glossary'").fetchone()
+    if row and (int(row[0]) < 4 or old_glossary):
         _backup(conn, path, int(row[0]))
     # The web and MCP servers share one database; the write lock makes sure
     # only the first of them to start runs the legacy migration.
@@ -274,6 +288,11 @@ def _upgrade(conn) -> None:
             else:
                 conn.execute("INSERT INTO projects (code, name) VALUES (?, ?)",
                              (orphan, orphan.title()))
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'glossary'").fetchone():
+        # Schema 6: the term → canonical table becomes entries with variants.
+        for term, canonical in conn.execute("SELECT term, canonical FROM glossary ORDER BY term").fetchall():
+            _insert_legacy_glossary(conn, term, canonical)
+        conn.execute("DROP TABLE glossary")
     if version < SCHEMA_VERSION:
         _log_event(conn, "system", "schema_upgraded", from_version=version, to_version=SCHEMA_VERSION)
     conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
@@ -1452,54 +1471,151 @@ def rename_tag(old, new, source: str | None = None) -> tuple[str, str, int]:
         return old, new, len(ids)
 
 # ── Glossary ──────────────────────────────────────────────────────────────────
+# An entry is a name plus optional notes (facts about it) and the variants it
+# gets misheard as. Refs accept an entry id, its name, or any of its variants.
 
-def load_glossary() -> dict[str, str]:
+NAME_SEP = " — "
+
+
+def parse_canonical(text: str) -> tuple[str, str]:
+    """Split the old 'Name — notes' form into (name, notes)."""
+    name, _, notes = (text or "").partition(NAME_SEP)
+    return name.strip(), notes.strip()
+
+
+def _insert_legacy_glossary(conn, term: str, canonical: str) -> None:
+    """Fold one term → canonical row of the old table into entries/variants.
+    A key may list variants ('a / b'); a canonical without ' — ' is a name when
+    short and otherwise a fact about the term's first spelling."""
+    variants = [v.strip() for v in (term or "").split("/") if v.strip()]
+    name, notes = parse_canonical(canonical)
+    if (len(name) > 40 or name.endswith(".") or ". " in name) and variants:
+        # A sentence, not a name: the whole canonical is a fact about the term.
+        name, notes = variants[0], (canonical or "").strip()
+    if not name:
+        return
+    ts = now_iso()
+    row = conn.execute("SELECT id, notes FROM glossary_entry WHERE name = ?", (name,)).fetchone()
+    if row:
+        entry_id = row["id"]
+        if notes and notes not in row["notes"]:
+            conn.execute("UPDATE glossary_entry SET notes = ? WHERE id = ?",
+                         ("; ".join(x for x in (row["notes"], notes) if x), entry_id))
+    else:
+        entry_id = conn.execute("INSERT INTO glossary_entry (name, notes, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                                (name, notes, ts, ts)).lastrowid
+    for v in variants:
+        if v.lower() != name.lower():
+            conn.execute("INSERT OR IGNORE INTO glossary_variant (variant, entry_id) VALUES (?, ?)", (v, entry_id))
+
+
+def _glossary_dict(conn, row) -> dict:
+    variants = [r[0] for r in conn.execute(
+        "SELECT variant FROM glossary_variant WHERE entry_id = ? ORDER BY variant COLLATE NOCASE", (row["id"],))]
+    return {"id": row["id"], "name": row["name"], "notes": row["notes"], "variants": variants}
+
+
+def _glossary_row(conn, ref, variants: bool = True):
+    ref = str(ref).strip()
+    row = None
+    if ref.isdigit():
+        row = conn.execute("SELECT * FROM glossary_entry WHERE id = ?", (int(ref),)).fetchone()
+    if not row:
+        row = conn.execute("SELECT * FROM glossary_entry WHERE name = ?", (ref,)).fetchone()
+    if not row and variants:
+        row = conn.execute("SELECT e.* FROM glossary_entry e JOIN glossary_variant v ON v.entry_id = e.id "
+                           "WHERE v.variant = ?", (ref,)).fetchone()
+    return row
+
+
+def glossary_line(entry: dict) -> str:
+    """One entry as text: the name, its facts, then what it is misheard as."""
+    line = entry["name"] + (NAME_SEP + entry["notes"] if entry["notes"] else "")
+    if entry["variants"]:
+        line += "  [heard as: " + ", ".join(entry["variants"]) + "]"
+    return line
+
+
+def list_glossary() -> list[dict]:
     with connect() as c:
-        return {r["term"]: r["canonical"] for r in c.execute("SELECT * FROM glossary ORDER BY term")}
+        return [_glossary_dict(c, r) for r in c.execute("SELECT * FROM glossary_entry ORDER BY name COLLATE NOCASE")]
 
 
-def set_glossary_term(term: str, canonical: str, source: str | None = None) -> None:
-    term, canonical = (term or "").strip().lower(), (canonical or "").strip()
-    if not term or not canonical:
-        raise ToledoError("term and canonical are required")
+def set_glossary_entry(name: str, notes: str | None = None, variants=(), remove_variants=(),
+                       entry_id: int | None = None, source: str | None = None) -> dict:
+    """Create or edit an entry. With entry_id the entry is renamed to `name`;
+    without it `name` finds the entry (creating one if new). notes=None keeps
+    the facts as they are; variants are added, remove_variants dropped."""
+    name = (name or "").strip()
+    if not name:
+        raise ToledoError("name is required")
+    ts = now_iso()
     with connect() as c:
-        old = c.execute("SELECT canonical FROM glossary WHERE term = ?", (term,)).fetchone()
-        if old and old["canonical"] == canonical:
-            return
-        # Already covered as a variant of a fuller entry ('a / b' → 'X — notes').
-        for key, canon in c.execute("SELECT term, canonical FROM glossary"):
-            if term in (v.strip() for v in key.split("/")) and canon.startswith(canonical):
-                return
-        c.execute("INSERT OR REPLACE INTO glossary VALUES (?, ?)", (term, canonical))
-        _log_event(c, "glossary", "glossary_set", term, old=old["canonical"] if old else None,
-                   new=canonical, source=source)
+        if entry_id is not None:
+            row = c.execute("SELECT * FROM glossary_entry WHERE id = ?", (int(entry_id),)).fetchone()
+            if not row:
+                raise NotFound(f"No glossary entry #{entry_id}")
+        else:
+            row = c.execute("SELECT * FROM glossary_entry WHERE name = ?", (name,)).fetchone()
+        clash = c.execute("SELECT e.name FROM glossary_variant v JOIN glossary_entry e ON e.id = v.entry_id "
+                          "WHERE v.variant = ?", (name,)).fetchone()
+        if clash and not (row and clash["name"] == row["name"]):
+            raise ToledoError(f"'{name}' is already a variant of '{clash['name']}'")
+        before = _glossary_dict(c, row) if row else None
+        if row:
+            other = c.execute("SELECT id FROM glossary_entry WHERE name = ? AND id != ?", (name, row["id"])).fetchone()
+            if other:
+                raise ToledoError(f"A glossary entry named '{name}' already exists")
+            new_notes = row["notes"] if notes is None else notes.strip()
+            c.execute("UPDATE glossary_entry SET name = ?, notes = ?, updated_at = ? WHERE id = ?",
+                      (name, new_notes, ts, row["id"]))
+            entry = row["id"]
+        else:
+            entry = c.execute("INSERT INTO glossary_entry (name, notes, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                              (name, (notes or "").strip(), ts, ts)).lastrowid
+        for v in (x.strip() for x in remove_variants or ()):
+            c.execute("DELETE FROM glossary_variant WHERE variant = ? AND entry_id = ?", (v, entry))
+        for v in (x.strip() for x in variants or ()):
+            if not v or v.lower() == name.lower():
+                continue
+            owner = c.execute("SELECT e.id, e.name FROM glossary_variant v JOIN glossary_entry e ON e.id = v.entry_id "
+                              "WHERE v.variant = ?", (v,)).fetchone()
+            if owner and owner["id"] != entry:
+                raise ToledoError(f"'{v}' is already a variant of '{owner['name']}'")
+            if c.execute("SELECT 1 FROM glossary_entry WHERE name = ? AND id != ?", (v, entry)).fetchone():
+                raise ToledoError(f"'{v}' is already the name of another glossary entry")
+            c.execute("INSERT OR IGNORE INTO glossary_variant (variant, entry_id) VALUES (?, ?)", (v, entry))
+        after = _glossary_dict(c, c.execute("SELECT * FROM glossary_entry WHERE id = ?", (entry,)).fetchone())
+        changed = before != after
+        if changed:
+            _log_event(c, "glossary", "glossary_set", after["name"],
+                       old=glossary_line(before) if before else None, new=glossary_line(after), source=source)
+        return {**after, "created": before is None, "changed": changed}
 
 
-def remove_glossary_term(term: str, source: str | None = None) -> str:
-    """Delete a glossary entry by its exact key. Returns the canonical it held."""
-    term = (term or "").strip().lower()
+def remove_glossary_entry(ref, source: str | None = None) -> dict:
+    """Delete an entry (and its variants) by id or name. A variant is not
+    enough: removing one is done by editing the entry."""
     with connect() as c:
-        old = c.execute("SELECT canonical FROM glossary WHERE term = ?", (term,)).fetchone()
-        if not old:
-            raise NotFound(f"No glossary entry '{term}'")
-        c.execute("DELETE FROM glossary WHERE term = ?", (term,))
-        _log_event(c, "glossary", "glossary_removed", term, old=old["canonical"], source=source)
-        return old["canonical"]
+        row = _glossary_row(c, ref, variants=False)
+        if not row:
+            raise NotFound(f"No glossary entry '{ref}'")
+        entry = _glossary_dict(c, row)
+        c.execute("DELETE FROM glossary_entry WHERE id = ?", (row["id"],))
+        _log_event(c, "glossary", "glossary_removed", entry["name"], old=glossary_line(entry), source=source)
+        return entry
 
 
 def glossary_hits(text: str) -> list[tuple[str, str]]:
-    """Glossary terms still present in text, as (term, canonical) pairs.
-    A glossary key may list variants ('paragard / perigard'). A variant that
-    also appears in its canonical text is the correct spelling, not a
-    mishearing, so it is not reported."""
+    """Variants still present in text, as (variant, name) pairs. A variant that
+    also appears in its entry's name is the correct spelling, not a mishearing,
+    so it is not reported."""
     hits = []
-    for term, canonical in load_glossary().items():
-        for variant in (v.strip() for v in term.split("/")):
-            if not variant:
-                continue
+    for entry in list_glossary():
+        for variant in entry["variants"]:
             pattern = re.compile(rf"(?<!\w){re.escape(variant)}(?!\w)", re.IGNORECASE)
-            if pattern.search(text or "") and not pattern.search(canonical):
-                hits.append((variant, canonical))
+            if pattern.search(text or "") and not pattern.search(entry["name"]):
+                hits.append((variant, entry["name"]))
     return hits
 
 
@@ -1812,7 +1928,7 @@ def migrate_from_files(conn, tasks_dir: Path, context_file: Path | None = None) 
     gf = tasks_dir / "glossary.json"
     if gf.exists():
         for term, canonical in json.loads(gf.read_text()).items():
-            conn.execute("INSERT OR REPLACE INTO glossary VALUES (?, ?)", (term.lower(), canonical))
+            _insert_legacy_glossary(conn, term, canonical)
             counts["glossary"] += 1
 
     slug_to_id = {}

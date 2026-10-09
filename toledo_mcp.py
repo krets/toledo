@@ -284,7 +284,7 @@ def glossary_warning(j: dict) -> str:
     hits = db.glossary_hits(f"{j['title']}\n{j['raw']}\n{j['summary']}")
     if not hits:
         return ""
-    listed = "; ".join(f"'{term}' → {canonical}" for term, canonical in hits)
+    listed = "; ".join(f"'{variant}' → {name}" for variant, name in hits)
     return (f"\n  ⚠ Glossary terms still in the entry: {listed}. "
             f"Correct them with update_journal (entry #{j['id']}).")
 
@@ -810,33 +810,36 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="remove_glossary",
             description=(
-                "Delete a glossary entry by its exact term (as listed in the toledo://glossary "
-                "resource, e.g. 'paragard / perigard' for a combined key). Use it to drop "
-                "duplicate or wrong entries."
+                "Delete a glossary entry, with all its variants, by its name (as listed in the "
+                "toledo://glossary resource). Use it to drop duplicate or wrong entries. To drop "
+                "one wrong variant, use update_glossary with remove_variants instead."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "term": {"type": "string", "description": "The entry's term, exactly as listed"},
+                    "name": {"type": "string", "description": "The entry's name, exactly as listed"},
                 },
-                "required": ["term"],
+                "required": ["name"],
             },
         ),
         types.Tool(
             name="update_glossary",
             description=(
-                "Add or update a glossary entry mapping a raw/garbled term to its canonical "
-                "form (e.g. a misheard proper noun). Used to make the glossary self-healing "
-                "so the same term is never asked about twice. Read the current glossary via "
-                "the toledo://glossary resource."
+                "Add or edit a glossary entry: a name (the correct spelling), the facts known "
+                "about it, and the variants it gets misheard or misspelled as. Used to make the "
+                "glossary self-healing so the same term is never asked about twice. An existing "
+                "name is edited in place: variants are added to it and notes replace the old ones "
+                "only when given. Read the current glossary via the toledo://glossary resource."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "term":      {"type": "string", "description": "Raw or garbled term as it appeared"},
-                    "canonical": {"type": "string", "description": "Confirmed canonical form/meaning"},
+                    "name":     {"type": "string", "description": "Correct form of the name, e.g. 'PeriGuard'"},
+                    "notes":    {"type": "string", "description": "Facts the user stated about it (who or what it is). Replaces the existing notes; omit to keep them"},
+                    "variants": {"type": "array", "items": {"type": "string"}, "description": "Misheard or misspelled forms to read as this name; added to the existing ones"},
+                    "remove_variants": {"type": "array", "items": {"type": "string"}, "description": "Variants to drop from the entry"},
                 },
-                "required": ["term", "canonical"],
+                "required": ["name"],
             },
         ),
         types.Tool(
@@ -1452,16 +1455,22 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
 
     # ── update_glossary ───────────────────────────────────────────────────────
     if name == "update_glossary":
-        term      = args["term"].strip()
-        canonical = args["canonical"].strip()
-        db.set_glossary_term(term, canonical)
-        return ok(f"Glossary: '{term}' → '{canonical}'")
+        gname, gnotes = (args.get("name") or "").strip(), args.get("notes")
+        variants = list(args.get("variants") or [])
+        if not gname and args.get("canonical"):
+            # Older clients send term → 'Name — notes'
+            gname, parsed_notes = db.parse_canonical(args["canonical"])
+            gnotes = gnotes if gnotes is not None else (parsed_notes or None)
+            variants += [args["term"]] if args.get("term") else []
+        e = db.set_glossary_entry(gname, notes=gnotes, variants=variants,
+                                  remove_variants=args.get("remove_variants") or [])
+        verb = "added" if e["created"] else "updated" if e["changed"] else "unchanged"
+        return ok(f"Glossary {verb}: {db.glossary_line(e)}")
 
     # ── remove_glossary ───────────────────────────────────────────────────────
     if name == "remove_glossary":
-        term = args["term"].strip()
-        db.remove_glossary_term(term)
-        return ok(f"Glossary: removed '{term}'")
+        e = db.remove_glossary_entry((args.get("name") or args.get("term") or "").strip())
+        return ok(f"Glossary: removed '{e['name']}'")
 
     # ── Journal ───────────────────────────────────────────────────────────────
     if name == "add_journal":
@@ -1559,7 +1568,7 @@ async def list_resources() -> list[types.Resource]:
         types.Resource(
             uri="toledo://glossary",
             name="Toledo Glossary",
-            description="Self-healing glossary of proper nouns/terms, mutated via update_glossary",
+            description="Self-healing glossary: each name with facts about it and the spellings it is misheard as, mutated via update_glossary",
             mimeType="text/plain",
         ),
         types.Resource(
@@ -1598,10 +1607,10 @@ async def read_resource(uri: types.AnyUrl) -> str:
         return result[0].text
 
     if uri_str == "toledo://glossary":
-        glossary = db.load_glossary()
+        glossary = db.list_glossary()
         if not glossary:
             return "No glossary entries yet."
-        return "\n".join(f"{term} → {canonical}" for term, canonical in sorted(glossary.items()))
+        return "\n".join(db.glossary_line(e) for e in glossary)
 
     if uri_str == "toledo://journal/recent":
         result = await _dispatch("list_journal", {"limit": 10})
@@ -1647,13 +1656,13 @@ project names, and terms that don't clearly match a glossary entry or an existin
 task/project name. List every proper noun in the dump that is absent from the glossary \
 and Toledo, and ask about all of them in ONE message. Do not ask again. State no fact that is \
 not in the dump or the snapshot. For each term the user resolves, record an update_glossary \
-change (term → canonical form) for step 4 so it is never asked about again. The glossary is \
+change (name, plus the misheard spelling as a variant) for step 4 so it is never asked about again. The glossary is \
 healed via that tool, not by editing this prompt. This round happens right after the exit \
 phrase and before any write: ask about every unrecognized proper noun, name spelling, or place, \
 never skipping it because the dump seemed clear. update_glossary is for misheard or misspelled terms and stable \
-identities; skip correctly spelled names. When adding an alias to an existing entry, keep its \
-canonical form and description and add only the new variant. On a correction, edit only the \
-contradicted clause. Store only facts the user stated, nothing inferred or time-bound. If the \
+identities; skip correctly spelled names. When adding an alias to an existing entry, call update_glossary with its \
+name and only the new variant; leave notes out so the existing ones are kept. On a correction, \
+send notes with only the contradicted clause changed. Store only facts the user stated, nothing inferred or time-bound. If the \
 user asked for a calendar entry, also ask which calendar in this round.
 
 3. Cross-reference what the user mentioned against the active tasks in the snapshot. Where it's ambiguous whether something is done, still in \
@@ -1673,8 +1682,7 @@ already holds. Report any ✗ or ⚠ lines in the result.
 
 5. The journal entry saved in step 4 has two parts, and both are run against the glossary: \
 the snapshot's entries plus the terms resolved in step 2. Replace every misheard term, \
-including near variants of a listed one, with its canonical form (the name itself, not the \
-explanation that follows it). raw is otherwise the collection-mode messages verbatim and in \
+including near variants of a listed one, with the entry's name. raw is otherwise the collection-mode messages verbatim and in \
 order, fillers included, not cleaned up; post-dump answers go in summary only. summary is your revised write-up in Markdown: what happened, decisions and ideas \
 worth keeping, and the task changes this session made. Leave the title empty unless the day \
 has an obvious theme, and leave the date to default to today. The save result flags glossary \
@@ -1853,9 +1861,9 @@ in the same apply_changes call as any pending writes (add_journal last), before 
 flag. This is not the evening dump: keep it brief and capture only what the user said this \
 session about their focus and alignment for the day, plus anything outstanding that is not \
 already tracked in Toledo. Run both parts against the glossary in the snapshot, replacing every \
-misheard term with its canonical form. If a name, spelling or place is unrecognized, ask about \
-it in one batched question before writing, and when aliasing an existing glossary entry keep its \
-canonical form and add only the new variant, storing only facts the user stated. raw is those statements as the user gave them; summary \
+misheard term with the entry's name. If a name, spelling or place is unrecognized, ask about \
+it in one batched question before writing, and when aliasing an existing glossary entry send its \
+name with only the new variant to update_glossary, storing only facts the user stated. raw is those statements as the user gave them; summary \
 is a few lines of Markdown. Set the title to "Morning focus" so it is distinguishable from the \
 evening entry, and leave the date to default to today. Skip the entry if the session produced \
 no focus or outstanding items. Mention the save only if it failed or the result flags glossary \

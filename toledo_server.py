@@ -414,8 +414,7 @@ def draft_summary(raw: str) -> dict:
     from litellm import completion
 
     model, api_key, api_base = resolve_llm(db.load_config().get("llm", {}))
-    glossary = db.load_glossary()
-    glossary_text = "\n".join(f"{t} → {c}" for t, c in sorted(glossary.items())) or "(empty)"
+    glossary_text = "\n".join("- " + db.glossary_line(e) for e in db.list_glossary()) or "(empty)"
     try:
         resp = completion(model=model, api_key=api_key, api_base=api_base, timeout=120,
                           messages=[{"role": "system", "content": JOURNAL_SUMMARY_PROMPT.format(glossary=glossary_text)},
@@ -427,7 +426,7 @@ def draft_summary(raw: str) -> dict:
     if text.startswith("TITLE:"):
         first, _, rest = text.partition("\n")
         title, summary = first[len("TITLE:"):].strip(), rest.strip()
-    leftover = [f"{t} → {c}" for t, c in db.glossary_hits(f"{title}\n{summary}")]
+    leftover = [f"{v} → {n}" for v, n in db.glossary_hits(f"{title}\n{summary}")]
     return {"title": title, "summary": summary, "glossary_left": leftover}
 
 
@@ -488,24 +487,38 @@ def delete_journal(entry_id):
 
 @app.route("/api/glossary", methods=["GET"])
 def list_glossary():
-    return jsonify([{"term": t, "canonical": c} for t, c in db.load_glossary().items()])
+    return jsonify(db.list_glossary())
+
+
+def glossary_body():
+    data = request.json or {}
+    variants = data.get("variants") or []
+    if isinstance(variants, str):
+        variants = variants.splitlines()
+    return data.get("name"), data.get("notes"), [v for v in variants if v.strip()]
 
 
 @app.route("/api/glossary", methods=["POST"])
-def set_glossary():
-    data, err, code = require_json("term", "canonical")
-    if err:
-        return err, code
-    db.set_glossary_term(data["term"], data["canonical"], source="web")
-    return jsonify({"term": data["term"].strip().lower(), "canonical": data["canonical"].strip()}), 201
+def add_glossary():
+    name, notes, variants = glossary_body()
+    return jsonify(db.set_glossary_entry(name, notes=notes or "", variants=variants, source="web")), 201
 
 
-@app.route("/api/glossary/delete", methods=["POST"])
-def remove_glossary():
-    data, err, code = require_json("term")
-    if err:
-        return err, code
-    db.remove_glossary_term(data["term"], source="web")
+@app.route("/api/glossary/<int:entry_id>", methods=["PUT"])
+def update_glossary(entry_id):
+    """Replace an entry's name, notes and variant list."""
+    name, notes, variants = glossary_body()
+    current = next((e for e in db.list_glossary() if e["id"] == entry_id), None)
+    if not current:
+        raise db.NotFound(f"No glossary entry #{entry_id}")
+    gone = [v for v in current["variants"] if v.lower() not in {x.strip().lower() for x in variants}]
+    return jsonify(db.set_glossary_entry(name, notes=notes or "", variants=variants, remove_variants=gone,
+                                         entry_id=entry_id, source="web"))
+
+
+@app.route("/api/glossary/<int:entry_id>", methods=["DELETE"])
+def remove_glossary(entry_id):
+    db.remove_glossary_entry(entry_id, source="web")
     return jsonify({"deleted": True})
 
 
@@ -819,11 +832,13 @@ the dump says so. A time such as "tomorrow" or "Friday" applies only to the item
 - Format as Markdown with a short bold or heading label per topic and compact bullet lists: \
 one line per bullet, no blank lines between bullets.
 - The dump may contain misheard words from dictation. Replace every misheard term, \
-including near variants of a listed one, with its canonical form from the glossary below \
-(the name itself, not the explanation after it). Never invent glossary entries.
+including near variants of a listed one, with that entry's name. Each entry is a name, then \
+facts about it, then the spellings it is "heard as". Use the facts only to decide which entry a \
+word means; do not copy them into the summary unless the dump said them. Never invent glossary \
+entries.
 - Keep the user's first-person voice. No preamble, no closing remarks.
 
-Glossary (misheard term → canonical):
+Glossary:
 {glossary}
 """
 
