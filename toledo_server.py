@@ -404,6 +404,36 @@ def list_journal():
                                    query=a.get("q"), since=a.get("since"), until=a.get("until")))
 
 
+@app.route("/api/journal/summarize", methods=["POST"])
+def summarize_journal():
+    """Draft a title and Markdown summary of a raw dump with the configured LLM,
+    run against the glossary. Nothing is saved; the form decides what to keep."""
+    from litellm import completion
+
+    data, err, code = require_json("raw")
+    if err:
+        return err, code
+    raw = (data["raw"] or "").strip()
+    if not raw:
+        return jsonify({"error": "raw is required"}), 400
+    model, api_key, api_base = resolve_llm(db.load_config().get("llm", {}))
+    glossary = db.load_glossary()
+    glossary_text = "\n".join(f"{t} → {c}" for t, c in sorted(glossary.items())) or "(empty)"
+    try:
+        resp = completion(model=model, api_key=api_key, api_base=api_base, timeout=120,
+                          messages=[{"role": "system", "content": JOURNAL_SUMMARY_PROMPT.format(glossary=glossary_text)},
+                                    {"role": "user", "content": raw}])
+    except Exception as e:
+        return jsonify({"error": f"Summarize failed: {e}"}), 502
+    text = (resp.choices[0].message.content or "").strip()
+    title, summary = "", text
+    if text.startswith("TITLE:"):
+        first, _, rest = text.partition("\n")
+        title, summary = first[len("TITLE:"):].strip(), rest.strip()
+    leftover = [f"{t} → {c}" for t, c in db.glossary_hits(f"{title}\n{summary}")]
+    return jsonify({"title": title, "summary": summary, "glossary_left": leftover})
+
+
 @app.route("/api/journal/<int:entry_id>", methods=["GET"])
 def get_journal(entry_id):
     return jsonify(db.get_journal(entry_id)[0])
@@ -427,6 +457,31 @@ def update_journal(entry_id):
 @app.route("/api/journal/<int:entry_id>", methods=["DELETE"])
 def delete_journal(entry_id):
     db.delete_journal(entry_id)
+    return jsonify({"deleted": True})
+
+
+# ── Glossary ──────────────────────────────────────────────────────────────────
+
+@app.route("/api/glossary", methods=["GET"])
+def list_glossary():
+    return jsonify([{"term": t, "canonical": c} for t, c in db.load_glossary().items()])
+
+
+@app.route("/api/glossary", methods=["POST"])
+def set_glossary():
+    data, err, code = require_json("term", "canonical")
+    if err:
+        return err, code
+    db.set_glossary_term(data["term"], data["canonical"], source="web")
+    return jsonify({"term": data["term"].strip().lower(), "canonical": data["canonical"].strip()}), 201
+
+
+@app.route("/api/glossary/delete", methods=["POST"])
+def remove_glossary():
+    data, err, code = require_json("term")
+    if err:
+        return err, code
+    db.remove_glossary_term(data["term"], source="web")
     return jsonify({"deleted": True})
 
 
@@ -725,6 +780,24 @@ def test_settings():
         return jsonify({"ok": False, "error": str(e)})
     return jsonify({"ok": True, "model": model, "reply": (resp.choices[0].message.content or "").strip()})
 
+
+JOURNAL_SUMMARY_PROMPT = """\
+You turn a raw voice-or-typed journal dump into a revised Markdown summary for the user's \
+personal journal.
+
+Rules:
+- The first line of your reply is "TITLE: <short title>" when the day has an obvious theme, \
+or exactly "TITLE:" when it does not. Everything after that line is the summary.
+- The summary covers what happened, decisions and ideas worth keeping, and open follow-ups. \
+Use short Markdown paragraphs or bullets. State nothing that is not in the dump.
+- The dump may contain misheard words from dictation. Replace every misheard term, \
+including near variants of a listed one, with its canonical form from the glossary below \
+(the name itself, not the explanation after it). Never invent glossary entries.
+- Keep the user's first-person voice. No preamble, no closing remarks.
+
+Glossary (misheard term → canonical):
+{glossary}
+"""
 
 # ── Chat / LLM ────────────────────────────────────────────────────────────────
 

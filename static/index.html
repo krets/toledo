@@ -53,12 +53,18 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   font-size:20px;font-weight:700;color:var(--accent-text);letter-spacing:-.2px;
   user-select:none;cursor:pointer;
 }
-#topbar-tabs{flex:1;display:flex;gap:16px;height:100%;align-items:center}
+#topbar-tabs{flex:1;display:flex;gap:2px;height:100%;align-items:flex-end;margin-left:10px;min-width:0}
 .tb-tab{
-  background:none;border:none;cursor:pointer;font-family:inherit;
-  font-size:15px;font-weight:600;color:var(--muted);padding:0;letter-spacing:-.1px;
+  background:none;border:1px solid transparent;border-bottom:none;cursor:pointer;font-family:inherit;
+  font-size:14px;font-weight:600;color:var(--muted);padding:0 14px;height:38px;letter-spacing:-.1px;
+  border-radius:8px 8px 0 0;position:relative;top:1px;transition:background .15s,color .15s;
 }
-.tb-tab.active{color:var(--accent-text)}
+.tb-tab:hover{background:var(--surface2);color:var(--text)}
+.tb-tab.active{
+  color:var(--accent-text);background:var(--bg);border-color:var(--border);
+  box-shadow:inset 0 2px 0 var(--accent);
+}
+@media(max-width:560px){.tb-tab{padding:0 9px;font-size:13px}}
 #ham-btn{
   background:none;border:none;color:var(--text);cursor:pointer;
   padding:7px;border-radius:6px;flex-shrink:0;transition:background .15s;
@@ -200,6 +206,13 @@ body.panel-open #fab{right:436px}
 .jr-flag{font-size:10px;color:var(--warning);flex-shrink:0}
 .jr-raw{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .jr-search{padding:8px 12px 4px}
+.jr-filters{display:flex;gap:8px;align-items:center;padding:4px 12px 8px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.jr-filters input[type=date]{width:auto;flex:0 1 140px}
+.jr-pane{display:flex;gap:6px;padding:10px 14px 0}
+.gl-term{font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.gl-canon{font-size:13px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
+.gl-row{display:flex;gap:8px;align-items:flex-start}
+.gl-row>div:first-child{flex:1;min-width:0}
 
 /* ── Activity ── */
 .act-row{display:flex;gap:10px;padding:7px 14px;border-bottom:1px solid var(--border);font-size:13px;align-items:baseline}
@@ -515,6 +528,8 @@ a.ev-title:hover{text-decoration:underline}
   <div id="topbar-tabs">
     <button class="tb-tab" id="tb-tasks" onclick="App.setView('tasks')">Tasks</button>
     <button class="tb-tab" id="tb-brief" onclick="App.setView('brief')">Brief</button>
+    <button class="tb-tab" id="tb-journal" onclick="App.setView('journal')">Journal</button>
+    <button class="tb-tab" id="tb-glossary" onclick="App.setView('glossary')">Glossary</button>
   </div>
   <div id="ham-wrap">
     <button id="ham-btn" onclick="App.toggleHamMenu(event)" title="Menu">
@@ -531,10 +546,6 @@ a.ev-title:hover{text-decoration:underline}
       <div class="ham-item" onclick="App.setView('search')">
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
         Search
-      </div>
-      <div class="ham-item" onclick="App.setView('journal')">
-        <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-        Journal
       </div>
       <div class="ham-item" onclick="App.setView('activity')">
         <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
@@ -563,7 +574,7 @@ a.ev-title:hover{text-decoration:underline}
 
 <div id="main"></div>
 
-<button id="fab" onclick="App.openSheet(App.view === 'journal' ? 'new-journal' : 'new-task')" title="New">+</button>
+<button id="fab" onclick="App.openSheet(App.fabSheet())" title="New">+</button>
 
 <!-- Detail panel -->
 <div id="panel">
@@ -678,6 +689,11 @@ const App = {
   // Journal: list (newest first), its search, and the entry open in the panel
   journalList: [],
   journalQuery: '',
+  journalSince: '',
+  journalUntil: '',
+  journalPane: 'summary',
+  glossary: [],
+  glossaryQuery: '',
   journal: null,
   // Activity: the loaded page(s) of the event log and its filters
   activity: [],
@@ -860,6 +876,7 @@ App.setView = function(v) {
   App.view = v;
   if (v === 'settings') { App.loadSettings(); return; }
   if (v === 'journal') { App.loadJournal().then(() => App.renderMain()); return; }
+  if (v === 'glossary') { App.loadGlossary().then(() => App.renderMain()); return; }
   if (v === 'activity') { App.loadActivity().then(() => App.renderMain()); return; }
   if (v === 'tags') { App.loadTags().then(() => App.renderMain()); return; }
   if (v === 'brief') { App.loadBrief().then(() => App.renderMain()); return; }
@@ -878,6 +895,8 @@ App.renderMain = function() {
   const back = $('back-btn');
   $('tb-tasks').classList.toggle('active', App.view === 'tasks');
   $('tb-brief').classList.toggle('active', App.view === 'brief');
+  $('tb-journal').classList.toggle('active', App.view === 'journal');
+  $('tb-glossary').classList.toggle('active', App.view === 'glossary');
   switch (App.view) {
     case 'tasks':
       el.innerHTML = App.buildTasksView();
@@ -913,7 +932,12 @@ App.renderMain = function() {
     case 'journal':
       el.innerHTML = App.buildJournalView();
       fab.style.display = 'flex';
-      back.style.display = 'block';
+      back.style.display = 'none';
+      break;
+    case 'glossary':
+      el.innerHTML = App.buildGlossaryView();
+      fab.style.display = 'flex';
+      back.style.display = 'none';
       break;
     case 'activity':
       el.innerHTML = App.buildActivityView();
@@ -1309,9 +1333,9 @@ document.addEventListener('keydown', e => {
     cards[i].focus();
     cards[i].scrollIntoView({ block: 'nearest' });
     if (App.panelOpen()) App.openTask(cards[i].dataset.slug);
-  } else if (e.key === 'n' && (App.view === 'tasks' || App.view === 'journal')) {
+  } else if (e.key === 'n' && (App.view === 'tasks' || App.view === 'journal' || App.view === 'glossary')) {
     e.preventDefault();
-    App.openSheet(App.view === 'journal' ? 'new-journal' : 'new-task');
+    App.openSheet(App.fabSheet());
   } else if (e.key === '/') {
     e.preventDefault();
     App.setView('search');
@@ -1712,7 +1736,8 @@ App.clearSettingsKey = async function() {
 App.loadJournal = async function() {
   try {
     const q = App.journalQuery.trim();
-    App.journalList = await api('GET', '/api/journal?limit=200' + (q ? '&q=' + encodeURIComponent(q) : ''));
+    App.journalList = await api('GET', '/api/journal?limit=200' + (q ? '&q=' + encodeURIComponent(q) : '')
+      + (App.journalSince ? '&since=' + App.journalSince : '') + (App.journalUntil ? '&until=' + App.journalUntil : ''));
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
@@ -1723,9 +1748,12 @@ function journalDay(date, opts) {
 App.buildJournalView = function() {
   let html = `<div class="view-header">Journal</div>
     <div class="jr-search"><input id="search-input" type="search" placeholder="Search journal…"
-      value="${esc(App.journalQuery)}" oninput="App.onJournalSearch(this.value)" autocomplete="off"></div>`;
+      value="${esc(App.journalQuery)}" oninput="App.onJournalSearch(this.value)" autocomplete="off"></div>
+    <div class="jr-filters"><span>From</span><input type="date" value="${esc(App.journalSince)}" onchange="App.setJournalDate('journalSince', this.value)">
+      <span>to</span><input type="date" value="${esc(App.journalUntil)}" onchange="App.setJournalDate('journalUntil', this.value)">
+      ${App.journalSince || App.journalUntil ? `<button class="abtn" onclick="App.setJournalDate('journalSince', ''); App.setJournalDate('journalUntil', '')">Clear</button>` : ''}</div>`;
   if (!App.journalList.length) {
-    const msg = App.journalQuery ? `No entries match "${esc(App.journalQuery)}"` : 'No journal entries yet';
+    const msg = App.journalQuery || App.journalSince || App.journalUntil ? `No entries match your filters` : 'No journal entries yet';
     return html + `<div class="empty"><div class="empty-icon">📓</div><p>${msg}</p></div>`;
   }
   let month = null;
@@ -1795,18 +1823,15 @@ App.renderJournalPanel = function() {
   $('panel-actions').innerHTML = `<button class="abtn" onclick="App.openSheet('edit-journal')">✎ Edit</button>
     <button class="abtn dng" onclick="App.deleteJournal()">🗑 Delete</button>`;
 
-  const summary = j.summary.trim() ? `<div class="md">${mdToHtml(j.summary)}</div>` : `<p class="md-empty">No summary yet.</p>`;
-  const raw = j.raw.trim() ? `<div class="jr-raw">${esc(j.raw)}</div>` : `<p class="md-empty">No raw text.</p>`;
-  $('panel-body').innerHTML = `<div class="psec">
-      <div class="psec-head"><span class="psec-title">Summary</span></div>
-      <div class="psec-body">${summary}</div>
+  const pane = App.journalPane;
+  const body = pane === 'raw'
+    ? (j.raw.trim() ? `<div class="jr-raw">${esc(j.raw)}</div>` : `<p class="md-empty">No raw text.</p>`)
+    : (j.summary.trim() ? `<div class="md">${mdToHtml(j.summary)}</div>` : `<p class="md-empty">No summary yet.</p>`);
+  $('panel-body').innerHTML = `<div class="jr-pane">
+      <button class="filter-btn${pane === 'summary' ? ' active' : ''}" onclick="App.setJournalPane('summary')">Markdown</button>
+      <button class="filter-btn${pane === 'raw' ? ' active' : ''}" onclick="App.setJournalPane('raw')">Raw</button>
     </div>
-    <div class="psec" style="border-bottom:none">
-      <details class="log-details"${j.summary.trim() ? '' : ' open'}>
-        <summary>Raw</summary>
-        <div class="log-inner">${raw}</div>
-      </details>
-    </div>`;
+    <div class="psec" style="border-bottom:none"><div class="psec-body">${body}</div></div>`;
 };
 
 App.deleteJournal = async function() {
@@ -1839,6 +1864,91 @@ App.submitJournal = async function() {
     await App.loadJournal();
     App.renderMain();
     App.openJournal(j.id);
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.setJournalDate = async function(key, v) {
+  App[key] = v;
+  await App.loadJournal();
+  App.renderMain();
+};
+
+App.setJournalPane = function(p) {
+  App.journalPane = p;
+  App.renderJournalPanel();
+};
+
+App.fabSheet = () => (App._glossaryEdit = null, App.view === 'journal' ? 'new-journal' : App.view === 'glossary' ? 'glossary-entry' : 'new-task');
+
+App.summarizeJournal = async function() {
+  const raw = $('f-jraw')?.value || '';
+  if (!raw.trim()) { App.toast('Add the raw text first'); return; }
+  const btn = $('f-jsum-btn');
+  btn.disabled = true; btn.textContent = 'Summarizing…';
+  try {
+    const r = await api('POST', '/api/journal/summarize', { raw });
+    $('f-jsummary').value = r.summary;
+    if (r.title && !$('f-jtitle').value.trim()) $('f-jtitle').value = r.title;
+    App.toast(r.glossary_left.length ? '⚠ Glossary terms left: ' + r.glossary_left.join('; ') : '✓ Summary drafted');
+  } catch(e) { App.toast('✗ ' + e.message); }
+  btn.disabled = false; btn.textContent = '✨ Summarize with AI';
+};
+
+// ── Glossary view ─────────────────────────────────────────────────────────────
+App.loadGlossary = async function() {
+  try { App.glossary = await api('GET', '/api/glossary'); }
+  catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.buildGlossaryView = function() {
+  const q = App.glossaryQuery.trim().toLowerCase();
+  const rows = App.glossary.filter(g => !q || g.term.includes(q) || g.canonical.toLowerCase().includes(q));
+  let html = `<div class="view-header">Glossary</div>
+    <div class="jr-search"><input id="search-input" type="search" placeholder="Filter terms…"
+      value="${esc(App.glossaryQuery)}" oninput="App.onGlossarySearch(this.value)" autocomplete="off"></div>`;
+  if (!rows.length) return html + `<div class="empty"><div class="empty-icon">📖</div><p>${q ? 'No terms match' : 'No glossary entries yet'}</p></div>`;
+  rows.forEach((g, i) => {
+    html += `<div class="card"><div class="gl-row">
+      <div><div class="gl-term">${esc(g.term)}</div><div class="gl-canon">→ ${esc(g.canonical)}</div></div>
+      <button class="abtn" onclick="App.editGlossary(${App.glossary.indexOf(g)})">✎ Edit</button>
+      <button class="abtn dng" onclick="App.deleteGlossary(${App.glossary.indexOf(g)})">🗑</button>
+    </div></div>`;
+  });
+  return html;
+};
+
+App.onGlossarySearch = function(q) {
+  App.glossaryQuery = q;
+  App.renderMain();
+  const inp = $('search-input');
+  if (inp) { inp.focus(); inp.setSelectionRange(q.length, q.length); }
+};
+
+App.editGlossary = function(i) { App._glossaryEdit = App.glossary[i]; App.openSheet('glossary-entry'); };
+
+App.deleteGlossary = async function(i) {
+  const g = App.glossary[i];
+  if (!g || !confirm(`Delete glossary entry "${g.term}"?`)) return;
+  try {
+    await api('POST', '/api/glossary/delete', { term: g.term });
+    App.toast('Deleted');
+    await App.loadGlossary();
+    App.renderMain();
+  } catch(e) { App.toast('✗ ' + e.message); }
+};
+
+App.submitGlossary = async function() {
+  const term = $('f-gterm')?.value.trim(), canonical = $('f-gcanon')?.value.trim();
+  if (!term || !canonical) { App.toast('Term and canonical form are required'); return; }
+  const old = App._glossaryEdit;
+  try {
+    if (old && old.term !== term.toLowerCase()) await api('POST', '/api/glossary/delete', { term: old.term });
+    await api('POST', '/api/glossary', { term, canonical });
+    App._glossaryEdit = null;
+    App.closeSheet();
+    App.toast('✓ Saved');
+    await App.loadGlossary();
+    App.renderMain();
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
@@ -2494,6 +2604,19 @@ App.openSheet = function(type) {
       title: 'Edit journal entry',
       body: () => App.journalForm(App.journal || {}),
     },
+    'glossary-entry': {
+      title: App._glossaryEdit ? 'Edit glossary entry' : 'New glossary entry',
+      body: () => {
+        const g = App._glossaryEdit || { term: '', canonical: '' };
+        return `
+        <div class="fg"><label>Term (as misheard; variants as "a / b")</label><input id="f-gterm" type="text" value="${esc(g.term)}" autocomplete="off"></div>
+        <div class="fg"><label>Canonical form</label><textarea id="f-gcanon" rows="3">${esc(g.canonical)}</textarea></div>
+        <div class="btn-row">
+          <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
+          <button class="btn btn-p" onclick="App.submitGlossary()">Save</button>
+        </div>`;
+      },
+    },
     'new-project': {
       title: 'New project',
       body: () => `
@@ -2533,7 +2656,7 @@ App.journalForm = function(j) {
       <div class="fg"><label>Title</label><input id="f-jtitle" type="text" value="${esc(j.title || '')}" autocomplete="off" placeholder="Optional"></div>
     </div>
     <div class="fg"><label>Raw</label><textarea id="f-jraw" rows="8" placeholder="The dump, as it came out…">${esc(j.raw || '')}</textarea></div>
-    <div class="fg"><label>Summary (Markdown)</label><textarea id="f-jsummary" rows="8" placeholder="Revised version…">${esc(j.summary || '')}</textarea></div>
+    <div class="fg"><label>Summary (Markdown) <button type="button" class="abtn" id="f-jsum-btn" style="margin-left:8px" onclick="App.summarizeJournal()">✨ Summarize with AI</button></label><textarea id="f-jsummary" rows="8" placeholder="Revised version…">${esc(j.summary || '')}</textarea></div>
     <div class="btn-row">
       <button class="btn btn-s" onclick="App.closeSheet()">Cancel</button>
       <button class="btn btn-p" onclick="App.submitJournal()">Save</button>
