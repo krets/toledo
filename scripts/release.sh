@@ -1,8 +1,8 @@
 #!/bin/bash
-# Build and (re)start the Toledo containers, stamping them with the current
-# commit and build time. docker-compose.yml reads TOLEDO_COMMIT and
-# TOLEDO_BUILD_TIME from the environment as build args; this is what sets them
-# — without it, both fall back to "unknown" inside the image (it has no .git).
+# Build and (re)start the Toledo containers. A plain `docker compose up -d
+# --build` already stamps the image with the commit and build time (the
+# Dockerfile reads them from .git); this script only makes the stamp explicit
+# by passing them as TOLEDO_COMMIT and TOLEDO_BUILD_TIME build args.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
