@@ -5,3 +5,4 @@ __pycache__
 toledo_backup_*.json
 .env
 .testhome/
+.release

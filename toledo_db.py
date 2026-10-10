@@ -327,10 +327,17 @@ def release_version() -> dict:
     """Code identity for this running process: the commit it was built from and
     when that build happened. Both the web server and MCP server call this so
     they agree on the same answer. Sourced from $TOLEDO_COMMIT / $TOLEDO_BUILD_TIME
-    (set by the Docker build — the image has no .git to read them from), falling
-    back to the local checkout's HEAD for a dev run outside Docker."""
+    (an explicit override), then the .release file the Docker build writes (the
+    image has no .git), then the local checkout's HEAD for a dev run."""
     commit = os.environ.get("TOLEDO_COMMIT", "").strip()[:12]
     built = os.environ.get("TOLEDO_BUILD_TIME", "").strip()
+    if not (commit and built):
+        # Written at image build time by the Dockerfile's stamp stage.
+        try:
+            file_commit, file_built = (Path(__file__).parent / ".release").read_text().split()[:2]
+            commit, built = commit or file_commit, built or file_built
+        except (OSError, ValueError):
+            pass
     if not (commit and built):
         try:
             out = subprocess.run(
