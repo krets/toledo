@@ -4,7 +4,7 @@
 import hashlib
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,7 +18,7 @@ import toledo_db as db
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 db.set_default_source("web")
-STARTED = datetime.now().isoformat(timespec="seconds")
+STARTED = datetime.now(timezone.utc).isoformat(timespec="seconds")  # aware, so browsers show local time
 
 # ── Morning brief ─────────────────────────────────────────────────────────────
 # Vendored from the standalone morning-brief project (github.com/krets/morning). State lives
