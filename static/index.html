@@ -115,10 +115,11 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 }
 #fab:active{transform:scale(.93)}
 /* The detail panel covers the FAB's corner; sit beside it, or hide when there's no room */
-body.panel-open #fab{right:436px}
+body.panel-open #fab{right:calc(var(--panel-w,420px) + 16px)}
+body.panel-max #fab{display:none !important}
 @media (max-width:500px){body.panel-open #fab{display:none !important}}
 /* On wide screens the list narrows to sit beside the panel instead of under it */
-@media (min-width:841px){body.panel-open #main{right:420px}}
+@media (min-width:841px){body.panel-open #main{right:var(--panel-w,420px)}}
 
 /* ── Filter bar ── */
 .filter-bar{
@@ -309,13 +310,22 @@ body.panel-open #fab{right:436px}
 
 /* ── Detail panel ── */
 #panel{
-  position:fixed;top:0;right:0;bottom:0;width:100%;max-width:420px;
+  position:fixed;top:0;right:0;bottom:0;width:var(--panel-w,420px);max-width:100%;
   background:var(--bg);z-index:200;
   transform:translateX(100%);transition:transform .26s cubic-bezier(.4,0,.2,1);
   display:flex;flex-direction:column;overflow:hidden;
   border-left:1px solid var(--border);
 }
 #panel.open{transform:translateX(0)}
+body.panel-max #panel{width:100%}
+#panel-resizer{position:absolute;left:0;top:0;bottom:0;width:6px;cursor:col-resize;z-index:5;touch-action:none}
+#panel-resizer:hover,#panel-resizer.drag{background:var(--accent);opacity:.5}
+body.panel-max #panel-resizer{display:none}
+body.panel-resizing{cursor:col-resize;user-select:none}
+.panel-max-btn{background:none;border:none;color:var(--muted);cursor:pointer;padding:4px;flex-shrink:0;line-height:1}
+.panel-max-btn:hover{color:var(--text)}
+.panel-max-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;display:block}
+@media (max-width:500px){.panel-max-btn,#panel-resizer{display:none}}
 .panel-head{
   background:var(--surface);border-bottom:1px solid var(--border);
   padding:11px 14px;display:flex;align-items:flex-start;gap:10px;flex-shrink:0;
@@ -615,9 +625,13 @@ a.ev-title:hover{text-decoration:underline}
 
 <!-- Detail panel -->
 <div id="panel">
+  <div id="panel-resizer" title="Drag to resize"></div>
   <div class="panel-head">
     <button class="panel-back" onclick="App.closePanel()">‹</button>
     <div class="panel-info" id="panel-info"></div>
+    <button class="panel-max-btn" id="panel-max-btn" onclick="App.togglePanelMax()" title="Full screen">
+      <svg viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+    </button>
   </div>
   <div class="panel-actions" id="panel-actions"></div>
   <div id="panel-body"></div>
@@ -2379,6 +2393,47 @@ App.closePanel = function() {
   document.body.classList.remove('panel-open');
   App.markSelected();
 };
+
+// Panel width is user-resizable (drag the left edge) and can fill the screen.
+(function() {
+  const root = document.documentElement, MIN = 320;
+  const store = {
+    get: k => { try { return localStorage.getItem(k); } catch(e) { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch(e) {} },
+  };
+  const clamp = w => Math.max(MIN, Math.min(w, window.innerWidth - 200));
+  const w0 = parseInt(store.get('panelWidth'), 10);
+  if (w0) root.style.setProperty('--panel-w', clamp(w0) + 'px');
+  if (store.get('panelMax') === '1') document.body.classList.add('panel-max');
+
+  App.togglePanelMax = function() {
+    const on = document.body.classList.toggle('panel-max');
+    store.set('panelMax', on ? '1' : '0');
+  };
+
+  const h = $('panel-resizer');
+  h.addEventListener('pointerdown', e => {
+    h.setPointerCapture(e.pointerId);
+    h.classList.add('drag');
+    document.body.classList.add('panel-resizing');
+  });
+  h.addEventListener('pointermove', e => {
+    if (!h.hasPointerCapture(e.pointerId)) return;
+    root.style.setProperty('--panel-w', clamp(window.innerWidth - e.clientX) + 'px');
+  });
+  const end = e => {
+    h.classList.remove('drag');
+    document.body.classList.remove('panel-resizing');
+    const w = parseInt(getComputedStyle($('panel')).width, 10);
+    if (w) store.set('panelWidth', w);
+  };
+  h.addEventListener('pointerup', end);
+  h.addEventListener('pointercancel', end);
+  h.addEventListener('dblclick', () => {
+    root.style.removeProperty('--panel-w');
+    store.set('panelWidth', '');
+  });
+})();
 
 App.panelOpen = () => $('panel').classList.contains('open');
 
