@@ -222,6 +222,10 @@ def _init(conn: sqlite3.Connection, path: Path) -> None:
             counts = migrate_from_files(conn, legacy, LEGACY_CONTEXT_FILE)
             print(f"ℹ Migrated legacy tasks from {legacy} into {path}: {counts}")
     _upgrade(conn)
+    # Task creation needs somewhere to file the task, so a database always
+    # has at least one project.
+    if not conn.execute("SELECT 1 FROM projects").fetchone():
+        _default_project(conn)
     conn.commit()
 
 
@@ -1386,6 +1390,8 @@ def remove_project(ref: str, source: str | None = None) -> str:
     with connect() as c:
         code = _project_code(c, ref)
         name = _project_name(c, code)
+        if c.execute("SELECT COUNT(*) FROM projects").fetchone()[0] <= 1:
+            raise Conflict(f"Project '{name}' is the only project — add another before removing it")
         count = c.execute("SELECT COUNT(*) FROM tasks WHERE project = ?", (code,)).fetchone()[0]
         if count:
             raise Conflict(f"Project '{name}' still has {count} task(s) — "
