@@ -266,6 +266,10 @@ body.panel-max #fab{display:none !important}
 .act-src{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:0 5px;flex-shrink:0;text-transform:uppercase;letter-spacing:.3px}
 .act-scope{font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:.3px;margin-right:6px}
 .act-more{display:block;margin:12px auto 24px}
+.act-count{text-align:center;font-size:12px;color:var(--muted);margin:14px 0 0}
+.act-presets,.act-sort{display:flex;gap:6px}
+.act-sort{margin-left:auto}
+.act-sort .abtn.on{border-color:var(--accent);color:var(--accent-text)}
 .log-more{background:none;border:none;color:var(--accent);font:inherit;font-size:12px;font-weight:600;cursor:pointer;padding:8px 0 0}
 
 /* ── Section label ── */
@@ -749,7 +753,9 @@ const App = {
   // Activity: the loaded page(s) of the event log and its filters
   activity: [],
   activityMore: false,
-  activityFilter: { scope: '', project: '', action: '', task: '' },
+  activityTotal: 0,
+  activityOrder: 'desc',
+  activityFilter: { scope: '', project: '', action: '', task: '', source: '', since: '', until: '' },
 };
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -2180,6 +2186,8 @@ const ACTIVITY_ACTIONS = {
 };
 const ACTIVITY_SCOPES = { '': 'Everything', task: 'Tasks', project: 'Projects', tag: 'Tags', journal: 'Journal',
   glossary: 'Glossary', context: 'Current task', system: 'System' };
+const ACTIVITY_SOURCES = { '': 'Any Source', web: 'Web', mcp: 'MCP', chat: 'Chat', none: 'Unknown' };
+const ACTIVITY_ORDERS = { desc: 'Newest first', asc: 'Oldest first' };
 const SCOPE_TAGS = { project: 'Project', tag: 'Tag', journal: 'Journal', glossary: 'Glossary',
   context: 'Current task', system: 'System' };
 
@@ -2266,8 +2274,18 @@ App.loadActivity = async function(append) {
   if (f.project) params.push('project=' + encodeURIComponent(f.project));
   if (f.action) params.push('action=' + ACTIVITY_ACTIONS[f.action][1]);
   if (f.task) params.push('task=' + encodeURIComponent(f.task));
+  if (f.source) params.push('source=' + f.source);
+  if (f.since) params.push('since=' + f.since);
+  if (f.until) params.push('until=' + f.until);
+  if (App.activityOrder === 'asc') params.push('order=asc');
   try {
-    const page = await api('GET', '/api/activity?' + params.join('&'));
+    // The total only changes with the filters, so a "load more" reuses it.
+    const filterParams = params.filter(p => !/^(limit|offset|order)=/.test(p)).join('&');
+    const [page, count] = await Promise.all([
+      api('GET', '/api/activity?' + params.join('&')),
+      append ? null : api('GET', '/api/activity/count?' + filterParams),
+    ]);
+    if (count) App.activityTotal = count.count;
     // One extra row tells whether there is another page.
     App.activityMore = page.length > 100;
     App.activity = (append ? App.activity : []).concat(page.slice(0, 100));
@@ -2282,10 +2300,27 @@ App.setActivityFilter = async function(key, value) {
 
 // A task's whole history, its subtasks' included, from its Activity Log.
 App.showTaskActivity = function(slug) {
-  App.activityFilter = { scope: '', project: '', action: '', task: slug };
+  App.activityFilter = { scope: '', project: '', action: '', task: slug, source: '', since: '', until: '' };
   App.activityTaskName = App.task && App.task.ref === slug ? App.task.name : slug;
   App.closePanel();
   App.setView('activity');
+};
+
+// Last n days, ending today (n = 0 is just today).
+App.setActivityRange = async function(n) {
+  const iso = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const today = new Date(), from = new Date();
+  from.setDate(today.getDate() - n);
+  App.activityFilter.since = iso(from);
+  App.activityFilter.until = iso(today);
+  await App.loadActivity();
+  App.renderMain();
+};
+
+App.setActivityOrder = async function(order) {
+  App.activityOrder = order;
+  await App.loadActivity();
+  App.renderMain();
 };
 
 App.moreActivity = async function() {
@@ -2303,7 +2338,7 @@ App.buildActivityView = function() {
       ).join('')}</div>
     </div>`;
   const actionLabel = a => a ? ACTIVITY_ACTIONS[a][0] : ACTIVITY_ACTIONS[''];
-  const filtered = f.scope || f.project || f.action || f.task;
+  const filtered = f.scope || f.project || f.action || f.task || f.source || f.since || f.until;
   const projects = [['', 'All Projects'], ...Object.keys(App.projects)
     .map(c => [c, projName(c)]).sort((a, b) => a[1].localeCompare(b[1]))];
   let html = `<div class="view-header">Activity</div>
@@ -2312,7 +2347,15 @@ App.buildActivityView = function() {
       ${dropdown('act-scope-dd', 'scope', ACTIVITY_SCOPES[f.scope], Object.entries(ACTIVITY_SCOPES))}
       ${dropdown('act-proj-dd', 'project', f.project ? projName(f.project) : 'All Projects', projects)}
       ${dropdown('act-action-dd', 'action', actionLabel(f.action), Object.keys(ACTIVITY_ACTIONS).map(a => [a, actionLabel(a)]))}
+      ${dropdown('act-src-dd', 'source', ACTIVITY_SOURCES[f.source], Object.entries(ACTIVITY_SOURCES))}
       ${filtered ? `<button class="filter-clear" onclick="App.clearActivityFilters()">Clear</button>` : ''}
+    </div>
+    <div class="jr-filters"><span>From</span><input type="date" value="${esc(f.since)}" onchange="App.setActivityFilter('since', this.value)">
+      <span>to</span><input type="date" value="${esc(f.until)}" onchange="App.setActivityFilter('until', this.value)">
+      <span class="act-presets">${[['Today', 0], ['7 days', 6], ['30 days', 29]].map(([l, n]) =>
+        `<button class="abtn" onclick="App.setActivityRange(${n})">${l}</button>`).join('')}</span>
+      <span class="act-sort">${Object.entries(ACTIVITY_ORDERS).map(([k, l]) =>
+        `<button class="abtn${App.activityOrder === k ? ' on' : ''}" onclick="App.setActivityOrder('${k}')">${l}</button>`).join('')}</span>
     </div>`;
   if (!App.activity.length) {
     return html + `<div class="empty"><div class="empty-icon">🕘</div><p>No activity${filtered ? ' matches these filters' : ' yet'}</p></div>`;
@@ -2326,8 +2369,11 @@ App.buildActivityView = function() {
     }
     html += App.activityRow(e);
   });
+  const left = App.activityTotal - App.activity.length;
+  html += `<div class="act-count">Showing ${App.activity.length} of ${App.activityTotal} event${App.activityTotal == 1 ? '' : 's'}</div>`;
   if (App.activityMore) {
-    html += `<button class="abtn act-more" onclick="App.moreActivity()">Load older</button>`;
+    const dir = App.activityOrder === 'asc' ? 'newer' : 'older';
+    html += `<button class="abtn act-more" onclick="App.moreActivity()">Load ${dir} (${left} more)</button>`;
   }
   return html;
 };
@@ -2368,7 +2414,7 @@ App.activityRow = function(e) {
 };
 
 App.clearActivityFilters = async function() {
-  App.activityFilter = { scope: '', project: '', action: '', task: '' };
+  App.activityFilter = { scope: '', project: '', action: '', task: '', source: '', since: '', until: '' };
   await App.loadActivity();
   App.renderMain();
 };

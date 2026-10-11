@@ -524,17 +524,30 @@ def remove_glossary(entry_id):
 
 # ── Activity ──────────────────────────────────────────────────────────────────
 
+def _activity_filters() -> dict:
+    a = request.args
+    return dict(since=a.get("since"), until=a.get("until"), scope=a.get("scope"),
+                task=a.get("task"), action=a.get("action"), project=a.get("project"),
+                source=a.get("source"))
+
+
 @app.route("/api/activity", methods=["GET"])
 def list_activity():
-    """The event log, newest first. ?scope=, ?action= take comma-separated
-    values; ?task= includes subtasks; ?project=; ?since=/&until= take a date
-    or timestamp; ?limit=/&offset= page through."""
+    """The event log, newest first (?order=asc for oldest first). ?scope=,
+    ?action=, ?source= take comma-separated values; ?task= includes
+    subtasks; ?project=; ?since=/&until= take a date or timestamp;
+    ?limit=/&offset= page through."""
     a = request.args
     return jsonify(db.list_activity(
         limit=int(a.get("limit", 100)), offset=int(a.get("offset", 0)),
-        since=a.get("since"), until=a.get("until"), scope=a.get("scope"),
-        task=a.get("task"), action=a.get("action"), project=a.get("project"),
+        oldest_first=a.get("order") == "asc", **_activity_filters(),
     ))
+
+
+@app.route("/api/activity/count", methods=["GET"])
+def count_activity():
+    """How many events the same filters match, for 'N more' in the UI."""
+    return jsonify({"count": db.count_activity(**_activity_filters())})
 
 
 # ── Context ───────────────────────────────────────────────────────────────────

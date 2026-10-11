@@ -929,6 +929,9 @@ async def list_tools() -> list[types.Tool]:
                     "scope":   {"type": "string", "description": "task, project, tag, glossary, journal, "
                                                                  "context, or system; comma-separate several"},
                     "action":  {"type": "string", "description": "e.g. state_changed, deleted; comma-separate several"},
+                    "source":  {"type": "string", "description": "web, mcp, chat or none (logged before "
+                                                                 "sources were recorded); comma-separate several"},
+                    "order":   {"type": "string", "enum": ["newest", "oldest"], "default": "newest"},
                     "limit":   {"type": "integer", "default": 50, "description": "Max events (default 50)"},
                 },
             },
@@ -1500,7 +1503,8 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
         events = db.list_activity(limit=args.get("limit") or 50, since=args.get("since"),
                                   until=args.get("until"), scope=args.get("scope"),
                                   task=args.get("task"), action=args.get("action"),
-                                  project=args.get("project"))
+                                  project=args.get("project"), source=args.get("source"),
+                                  oldest_first=args.get("order") == "oldest")
         if not events:
             return ok("No activity found.")
         return ok("\n".join(fmt_event_line(e) for e in events))

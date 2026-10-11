@@ -842,17 +842,15 @@ def _split(value) -> list[str]:
     return [str(v).strip() for v in items if str(v).strip()]
 
 
-def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = None,
-                  until: str | None = None, scope=None, task: str | None = None,
-                  action=None, project: str | None = None) -> list[dict]:
-    """Events newest first. since/until take a date (until inclusive) or a
-    full timestamp; scope and action take one value or several (list or
-    comma-separated); task includes its subtasks; project matches tasks now
-    in it, deleted tasks that were, and the project's own events."""
-    sql = ("SELECT a.*, t.slug AS t_slug, t.name AS t_name, t.project AS t_project, "
-           "t.state AS t_state, p.slug AS p_slug, p.name AS p_name "
-           "FROM activity a LEFT JOIN tasks t ON t.id = a.task_id "
-           "LEFT JOIN tasks p ON p.id = t.parent_id WHERE 1 = 1")
+_ACTIVITY_FROM = ("FROM activity a LEFT JOIN tasks t ON t.id = a.task_id "
+                  "LEFT JOIN tasks p ON p.id = t.parent_id")
+SOURCES = ["web", "mcp", "chat", "none"]
+
+
+def _activity_filter(c, since, until, scope, task, action, project, source) -> tuple[str, list]:
+    """The WHERE clause (and its params) shared by list_activity and
+    count_activity."""
+    sql = " WHERE 1 = 1"
     params: list = []
     if since:
         sql += " AND a.ts >= ?"
@@ -876,17 +874,58 @@ def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = 
     if actions:
         sql += f" AND a.action IN ({','.join('?' * len(actions))})"
         params += actions
+    sources = _split(source)
+    if sources:
+        bad = [s for s in sources if s not in SOURCES]
+        if bad:
+            raise ToledoError(f"Unknown source '{bad[0]}' (expected one of: {', '.join(SOURCES)})")
+        # 'none' is the events logged before the source was recorded.
+        named = [s for s in sources if s != "none"]
+        clauses = []
+        if named:
+            clauses.append(f"json_extract(a.data, '$.source') IN ({','.join('?' * len(named))})")
+            params += named
+        if "none" in sources:
+            clauses.append("json_extract(a.data, '$.source') IS NULL")
+        sql += " AND (" + " OR ".join(clauses) + ")"
+    if task:
+        tid = _resolve(c, task)["id"]
+        sql += " AND (a.task_id = ? OR t.parent_id = ?)"
+        params += [tid, tid]
+    if project:
+        code = _project_code(c, project)
+        sql += (" AND (t.project = ? OR (a.task_id IS NULL AND json_extract(a.data, '$.project') = ?)"
+                " OR (a.scope = 'project' AND (a.ref = ? OR json_extract(a.data, '$.into') = ?)))")
+        params += [code] * 4
+    return sql, params
+
+
+def count_activity(since: str | None = None, until: str | None = None, scope=None,
+                   task: str | None = None, action=None, project: str | None = None,
+                   source=None) -> int:
+    """How many events list_activity would return with no limit."""
     with connect() as c:
-        if task:
-            tid = _resolve(c, task)["id"]
-            sql += " AND (a.task_id = ? OR t.parent_id = ?)"
-            params += [tid, tid]
-        if project:
-            code = _project_code(c, project)
-            sql += (" AND (t.project = ? OR (a.task_id IS NULL AND json_extract(a.data, '$.project') = ?)"
-                    " OR (a.scope = 'project' AND (a.ref = ? OR json_extract(a.data, '$.into') = ?)))")
-            params += [code] * 4
-        sql += " ORDER BY a.ts DESC, a.id DESC LIMIT ? OFFSET ?"
+        where, params = _activity_filter(c, since, until, scope, task, action, project, source)
+        return c.execute(f"SELECT COUNT(*) {_ACTIVITY_FROM}{where}", params).fetchone()[0]
+
+
+def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = None,
+                  until: str | None = None, scope=None, task: str | None = None,
+                  action=None, project: str | None = None, source=None,
+                  oldest_first: bool = False) -> list[dict]:
+    """Events newest first (oldest first when asked). since/until take a date
+    (until inclusive) or a full timestamp; scope, action and source take one
+    value or several (list or comma-separated); source is web, mcp, chat or
+    none (logged before sources were recorded); task includes its subtasks;
+    project matches tasks now in it, deleted tasks that were, and the
+    project's own events."""
+    with connect() as c:
+        where, params = _activity_filter(c, since, until, scope, task, action, project, source)
+        sql = ("SELECT a.*, t.slug AS t_slug, t.name AS t_name, t.project AS t_project, "
+               "t.state AS t_state, p.slug AS p_slug, p.name AS p_name "
+               f"{_ACTIVITY_FROM}{where}")
+        sql += (" ORDER BY a.ts ASC, a.id ASC" if oldest_first else " ORDER BY a.ts DESC, a.id DESC")
+        sql += " LIMIT ? OFFSET ?"
         params += [int(limit) if limit else -1, int(offset or 0)]
         out = []
         for r in c.execute(sql, params):
