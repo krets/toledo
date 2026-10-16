@@ -325,6 +325,17 @@ For more than one write, send them together in a single apply_changes call. Ever
 write result names the task it touched and warns when a partial name matched several \
 tasks, so there is no need to re-read a task to check a write.
 
+Never complete a task or subtask (done_task, done_subtask) unless the user explicitly says \
+that specific item is complete; do not mark items done as a side effect of logging a related \
+update. To undo a completion, or to archive, use move_task (state=active/completed/archive; \
+subtasks work via #id).
+
+Write tools: create_task, rename_task, update_description, add_note, reprioritize_task, \
+reproject_task, set_due, set_recurrence, tag_task / untag_task, done_task, move_task, \
+delete_task, add_subtask / done_subtask / delete_subtask, add_project / rename_project / \
+merge_projects / remove_project, rename_tag, add_journal / update_journal, \
+update_glossary / remove_glossary. All of them also work as ops in apply_changes.
+
 Toledo ships guided-session prompts:
 - morning_planning: start-of-day "what should I work on" session
 - end_of_day_dump: end-of-day brain dump reconciled against tasks and the glossary
@@ -449,7 +460,10 @@ async def list_tools() -> list[types.Tool]:
             description=(
                 "Mark a task as completed. "
                 "For recurring tasks this advances the due date instead of completing it. "
-                "Optionally logs a closing note to the task's worklog."
+                "Optionally logs a closing note to the task's worklog. "
+                "Only call it when the user has said that specific task is complete, never as a "
+                "side effect of logging a related update. "
+                "To undo, call move_task with state=active (subtasks work via #id)."
             ),
             inputSchema={
                 "type": "object",
@@ -610,7 +624,10 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="done_subtask",
-            description="Mark a subtask as completed.",
+            description=(
+                "Mark a subtask as completed. Only call it when the user has said that specific "
+                "subtask is complete. To undo, call move_task with state=active on its #id."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1814,7 +1831,8 @@ and compare it against the entry's submitted timestamp to judge how recent it is
 entry and the snapshot as silent context for the whole session.
 
    The snapshot may end with a morning brief. Its calendar covers the next few days and \
-its weather is one line; both are silent context like the rest. Its tech events/meetups are \
+its weather is one line; both are silent context like the rest, and weather is raised only \
+when notable (see the wrap-up flag). Its tech events/meetups are \
 low priority: mention one only if the user asks or there is genuinely nothing else to discuss.
 
    Your entire opening message is "Ready." Then wait for the user to speak. No recap, no \
@@ -1831,8 +1849,11 @@ has not signaled they are finished. If the user keeps talking instead, continue 
 flag at the next wrap-up signal.
 
    Choose flag items from the snapshot and the journal entry:
+      - Tasks due today, regardless of priority.
       - High priority tasks that are overdue, due within the next few days, or aligned with \
 the Goals category.
+      - Weather, only when it is notable (abnormal wind, rain, and the like). Say nothing about \
+normal or unchanged weather.
       - High priority items from the journal entry that are not otherwise tracked.
       - Tasks that look stale by their upd: timestamp. Do not hard-filter out undated tasks.
    Exclude anything the user already addressed this session, including updates they gave that \
