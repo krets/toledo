@@ -1889,8 +1889,7 @@ already tracked in Toledo. Run both parts against the glossary in the snapshot, 
 misheard term with the entry's name. If a name, spelling or place is unrecognized, ask about \
 it in one batched question before writing, and when aliasing an existing glossary entry send its \
 name with only the new variant to update_glossary, storing only facts the user stated. raw is those statements as the user gave them; summary \
-is a few lines of Markdown. Set the title to "Morning focus" so it is distinguishable from the \
-evening entry, and leave the date to default to today. Skip the entry if the session produced \
+is a few lines of Markdown. Leave the title empty and the date to default to today. Skip the entry if the session produced \
 no focus or outstanding items. Mention the save only if it failed or the result flags glossary \
 terms, which you correct with update_journal. Do not render the journal as an artifact unless \
 the user asks.
