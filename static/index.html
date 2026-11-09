@@ -1379,16 +1379,16 @@ document.addEventListener('keydown', e => {
   }
   if (e.ctrlKey || e.metaKey || e.altKey || $('sheet').classList.contains('open')) return;
   const t = e.target;
-  const card = t.closest && t.closest('.card[data-slug]');
+  const card = t.closest && t.closest('.card[data-ref]');
   if (card && (e.key === 'Enter' || e.key === ' ')) {
     e.preventDefault();
-    App.openTask(card.dataset.slug);
+    App.openTask(card.dataset.ref);
     return;
   }
   if (t.matches && t.matches('input,textarea,select,[contenteditable]')) return;
   if (e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     if (!card && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) return;
-    const cards = [...document.querySelectorAll('#main .card[data-slug]')];
+    const cards = [...document.querySelectorAll('#main .card[data-ref]')];
     if (!cards.length) return;
     e.preventDefault();
     const down = e.key === 'j' || e.key === 'ArrowDown';
@@ -1396,7 +1396,7 @@ document.addEventListener('keydown', e => {
     i = i < 0 ? (down ? 0 : cards.length - 1) : Math.max(0, Math.min(cards.length - 1, i + (down ? 1 : -1)));
     cards[i].focus();
     cards[i].scrollIntoView({ block: 'nearest' });
-    if (App.panelOpen()) App.openTask(cards[i].dataset.slug);
+    if (App.panelOpen()) App.openTask(cards[i].dataset.ref);
   } else if (e.key === 'n' && (App.view === 'tasks' || App.view === 'journal' || App.view === 'glossary')) {
     e.preventDefault();
     App.fabAction();
@@ -1492,9 +1492,9 @@ App.buildCard = function(t, showState) {
   const pColorRaw = projColor(t.project);
   const pBg = hexToRgba(pColorRaw, 0.15);
   const pColor = readableAccent(pColorRaw, [26, 26, 26], 0.15);
-  const cls = 'card' + (t.overdue ? ' overdue' : '') + (App.task && App.panelOpen() && App.task.ref === t.slug ? ' selected' : '');
+  const cls = 'card' + (t.overdue ? ' overdue' : '') + (App.task && App.panelOpen() && App.task.ref === t.ref ? ' selected' : '');
 
-  return `<div class="${cls}" role="button" tabindex="0" data-slug="${esc(t.slug)}" onclick='App.openTask(${JSON.stringify(t.slug)})'>
+  return `<div class="${cls}" role="button" tabindex="0" data-ref="${esc(t.ref)}" onclick='App.openTask(${JSON.stringify(t.ref)})'>
     <div class="card-top">
       <span class="pri-badge" style="${priBadgeStyle(t.priority)}">${pl}</span>
       <span class="proj-tag" style="background:${pBg};color:${pColor}">${esc(projName(t.project))}</span>
@@ -2198,8 +2198,7 @@ function describeEvent(action, f, scope) {
   const proj = code => code ? projName(code) : '?';
   const state = { active: 'Reopened', completed: 'Completed', archive: 'Archived' };
   const days = n => `${n} day${n == 1 ? '' : 's'}`;
-  // Parent-side subtask events hold the subtask's slug.
-  const sub = slug => String(slug || '').replace(/-/g, ' ');
+  const sub = name => String(name || '');
   switch (action) {
     case 'created':
       return 'Created' + (f.project ? ` in ${proj(f.project)}` : '') +
@@ -2299,9 +2298,9 @@ App.setActivityFilter = async function(key, value) {
 };
 
 // A task's whole history, its subtasks' included, from its Activity Log.
-App.showTaskActivity = function(slug) {
-  App.activityFilter = { scope: '', project: '', action: '', task: slug, source: '', since: '', until: '' };
-  App.activityTaskName = App.task && App.task.ref === slug ? App.task.name : slug;
+App.showTaskActivity = function(ref) {
+  App.activityFilter = { scope: '', project: '', action: '', task: ref, source: '', since: '', until: '' };
+  App.activityTaskName = App.task && App.task.ref === ref ? App.task.name : ref;
   App.closePanel();
   App.setView('activity');
 };
@@ -2381,9 +2380,9 @@ App.buildActivityView = function() {
 App.activityRow = function(e) {
   const f = e.data || {};
   let target, open = '';
-  if (e.slug) {
-    const parent = e.parent ? `<span class="act-parent">${esc(e.parent_name || e.parent)} › </span>` : '';
-    target = `${parent}<span class="act-target${e.deleted ? ' gone' : ''}">${esc(e.name || e.slug)}</span>`;
+  if (e.name) {
+    const parent = e.parent ? `<span class="act-parent">${esc(e.parent)} › </span>` : '';
+    target = `${parent}<span class="act-target${e.deleted ? ' gone' : ''}">${esc(e.name)}</span>`;
     if (e.open) open = `App.openTask(${JSON.stringify(e.open)})`;
   } else if (e.scope === 'project') {
     target = `<span class="act-target">${esc(f.name || projName(e.ref))}</span>`;
@@ -2420,9 +2419,9 @@ App.clearActivityFilters = async function() {
 };
 
 // ── Task detail panel ─────────────────────────────────────────────────────────
-App.openTask = async function(slug) {
+App.openTask = async function(ref) {
   try {
-    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
+    App.task = await api('GET', '/api/tasks/' + encodeURIComponent(ref));
     App.journal = null;
     App.renderPanel();
     $('panel').classList.add('open');
@@ -2485,9 +2484,9 @@ App.panelOpen = () => $('panel').classList.contains('open');
 
 // Highlight the row whose task is open in the panel.
 App.markSelected = function() {
-  const slug = App.panelOpen() && App.task ? App.task.ref : null;
-  document.querySelectorAll('.card[data-slug]').forEach(c =>
-    c.classList.toggle('selected', c.dataset.slug === slug));
+  const ref = App.panelOpen() && App.task ? App.task.ref : null;
+  document.querySelectorAll('.card[data-ref]').forEach(c =>
+    c.classList.toggle('selected', c.dataset.ref === ref));
 };
 
 App.renderPanel = function() {
@@ -2559,7 +2558,7 @@ App.renderPanel = function() {
   }
 
   const crumb = tk.parent
-    ? `<button class="panel-crumb" onclick='App.openTask(${JSON.stringify(tk.parent.slug)})'>↑ ${esc(tk.parent.name)}</button>`
+    ? `<button class="panel-crumb" onclick='App.openTask(${JSON.stringify('#' + tk.parent.id)})'>↑ ${esc(tk.parent.name)}</button>`
     : '';
   $('panel-info').innerHTML = `${crumb}<h2>${esc(tk.name)}</h2><div class="panel-meta">${metaPills}</div>`;
 
@@ -2606,11 +2605,11 @@ App.renderPanel = function() {
     ? `<p class="md-empty">No subtasks yet.</p>`
     : allSubs.map(s => `<div class="sub-item">
         <button class="sub-check${s.done ? ' done' : ''}"
-          onclick='${s.done ? `App.undoSubtask(${JSON.stringify(s.slug)})` : `App.doneSubtask(${JSON.stringify(s.slug)})`}'
+          onclick='${s.done ? `App.undoSubtask(${JSON.stringify(s.ref)})` : `App.doneSubtask(${JSON.stringify(s.ref)})`}'
           title="${s.done ? 'Mark incomplete' : 'Mark done'}"></button>
         <span class="sub-name${s.done ? ' done' : ''}" onclick="App.openTask('#${s.id}')" title="Open subtask">${esc(s.name)}</span>
-        <button class="sub-rename" onclick='App.openSubRename(${JSON.stringify(s.slug)},${JSON.stringify(s.name)})' title="Rename">✎</button>
-        <button class="sub-delete" onclick='App.deleteSubtask(${JSON.stringify(s.slug)},${JSON.stringify(s.name)})' title="Delete">🗑</button>
+        <button class="sub-rename" onclick='App.openSubRename(${JSON.stringify(s.ref)},${JSON.stringify(s.name)})' title="Rename">✎</button>
+        <button class="sub-delete" onclick='App.deleteSubtask(${JSON.stringify(s.ref)},${JSON.stringify(s.name)})' title="Delete">🗑</button>
       </div>`).join('');
   // Subtasks don't nest.
   if (!tk.parent) body += `<div class="psec">
@@ -2710,7 +2709,7 @@ App.doAction = async function(action) {
 
 // After closing out the open task: back to the parent for a subtask.
 App.leaveTask = function() {
-  if (App.task?.parent) App.openTask(App.task.parent.slug);
+  if (App.task?.parent) App.openTask('#' + App.task.parent.id);
   else App.closePanel();
 };
 
@@ -2724,30 +2723,30 @@ App.doMove = async function(state) {
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
-App.doneSubtask = async function(subSlug) {
+App.doneSubtask = async function(subRef) {
   if (!App.task) return;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subdone`, { slug: subSlug });
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subdone`, { sub: subRef });
     App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('✓ Subtask done');
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
-App.undoSubtask = async function(subSlug) {
+App.undoSubtask = async function(subRef) {
   if (!App.task) return;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subundo`, { slug: subSlug });
+    await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subundo`, { sub: subRef });
     App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('↩ Subtask reopened');
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
-App.deleteSubtask = async function(subSlug, subName) {
+App.deleteSubtask = async function(subRef, subName) {
   if (!App.task || !confirm(`Delete subtask "${subName}"? This cannot be undone.`)) return;
   try {
-    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.ref)}/sub/${encodeURIComponent(subSlug)}`);
+    await api('DELETE', `/api/tasks/${encodeURIComponent(App.task.ref)}/sub/${encodeURIComponent(subRef)}`);
     App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();
     App.toast('🗑 Subtask deleted');
@@ -2986,14 +2985,14 @@ App.submitNote = async function() {
   const input = $('note-input'), btn = $('note-submit');
   const text = input?.value.trim();
   if (!text || !App.task || btn.disabled) return;
-  const slug = App.task.ref;
+  const ref = App.task.ref;
   btn.disabled = true;
   try {
-    await api('POST', `/api/tasks/${encodeURIComponent(slug)}/note`, { text });
-    delete App.noteDrafts[slug];
+    await api('POST', `/api/tasks/${encodeURIComponent(ref)}/note`, { text });
+    delete App.noteDrafts[ref];
     App.toast('✓ Note added');
-    const updated = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
-    if (App.task?.ref !== slug) return;  // moved on to another task meanwhile
+    const updated = await api('GET', '/api/tasks/' + encodeURIComponent(ref));
+    if (App.task?.ref !== ref) return;  // moved on to another task meanwhile
     App.task = updated;
     App.renderPanel();
     $('note-input')?.focus();
@@ -3019,9 +3018,9 @@ App.noteEditKey = function(e) {
   }
 };
 
-App.refreshTask = async function(slug) {
-  const updated = await api('GET', '/api/tasks/' + encodeURIComponent(slug));
-  if (App.task?.ref !== slug) return;  // moved on to another task meanwhile
+App.refreshTask = async function(ref) {
+  const updated = await api('GET', '/api/tasks/' + encodeURIComponent(ref));
+  if (App.task?.ref !== ref) return;  // moved on to another task meanwhile
   App.task = updated;
   App.renderPanel();
 };
@@ -3029,12 +3028,12 @@ App.refreshTask = async function(slug) {
 App.saveNote = async function(id) {
   const text = $('note-edit')?.value.trim();
   if (!text || !App.task) { App.toast('Note text required'); return; }
-  const slug = App.task.ref;
+  const ref = App.task.ref;
   try {
-    await api('PATCH', `/api/tasks/${encodeURIComponent(slug)}/notes/${id}`, { text });
+    await api('PATCH', `/api/tasks/${encodeURIComponent(ref)}/notes/${id}`, { text });
     App.noteEditing = null;
     App.toast('✓ Note updated');
-    await App.refreshTask(slug);
+    await App.refreshTask(ref);
   } catch(e) {
     App.toast('✗ ' + e.message);
   }
@@ -3042,11 +3041,11 @@ App.saveNote = async function(id) {
 
 App.deleteNote = async function(id) {
   if (!App.task || !confirm('Delete this note? This cannot be undone.')) return;
-  const slug = App.task.ref;
+  const ref = App.task.ref;
   try {
-    await api('DELETE', `/api/tasks/${encodeURIComponent(slug)}/notes/${id}`);
+    await api('DELETE', `/api/tasks/${encodeURIComponent(ref)}/notes/${id}`);
     App.toast('✓ Note deleted');
-    await App.refreshTask(slug);
+    await App.refreshTask(ref);
   } catch(e) {
     App.toast('✗ ' + e.message);
   }
@@ -3197,8 +3196,8 @@ App.submitRenameTask = async function() {
   } catch(e) { App.toast('✗ ' + e.message); }
 };
 
-App.openSubRename = function(slug, name) {
-  App._renameSub = { slug, name };
+App.openSubRename = function(ref, name) {
+  App._renameSub = { ref, name };
   App.openSheet('rename-subtask');
 };
 
@@ -3207,7 +3206,7 @@ App.submitRenameSubtask = async function() {
   if (!name || !App.task || !App._renameSub) { App.toast('Name required'); return; }
   try {
     await api('POST', `/api/tasks/${encodeURIComponent(App.task.ref)}/subrename`,
-      { slug: App._renameSub.slug, name });
+      { sub: App._renameSub.ref, name });
     App.closeSheet();
     App.task = await api('GET', '/api/tasks/' + encodeURIComponent(App.task.ref));
     App.renderPanel();

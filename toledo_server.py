@@ -65,10 +65,8 @@ def task_to_dict(d: dict) -> dict:
     parent = d.get("parent")
     result = {
         "id":         d["id"],
-        "slug":       d["slug"],
-        # What the PWA puts in API paths. A subtask goes by '#id': Flask
-        # decodes %2F before routing, so 'parent/child' can't be a path part.
-        "ref":        f"#{d['id']}" if parent else d["slug"],
+        # What the PWA puts in API paths.
+        "ref":        f"#{d['id']}",
         "parent":     parent,
         "state":      d["state"],
         "priority":   d["priority"],
@@ -83,7 +81,7 @@ def task_to_dict(d: dict) -> dict:
     }
     for s in d.get("subtasks", []):
         result["subtasks"][s["state"]].append({
-            "id": s["id"], "slug": s["slug"], "name": s["name"], "priority": s["priority"],
+            "id": s["id"], "ref": f"#{s['id']}", "name": s["name"], "priority": s["priority"],
             "due": s["due"],
         })
     if "description" in d:
@@ -158,9 +156,9 @@ def list_tasks():
     return jsonify(tasks)
 
 
-@app.route("/api/tasks/<slug>", methods=["GET"])
-def get_task(slug):
-    return jsonify(task_to_dict(db.get_task(slug)))
+@app.route("/api/tasks/<ref>", methods=["GET"])
+def get_task(ref):
+    return jsonify(task_to_dict(db.get_task(ref)))
 
 
 @app.route("/api/tasks", methods=["POST"])
@@ -180,154 +178,154 @@ def create_task():
     return jsonify(task_to_dict(d)), 201
 
 
-@app.route("/api/tasks/<slug>/done", methods=["POST"])
-def task_done(slug):
-    r = db.complete_task(slug)
+@app.route("/api/tasks/<ref>/done", methods=["POST"])
+def task_done(ref):
+    r = db.complete_task(ref)
     if r["recurring"]:
         return jsonify({"recurring": True, "next_due": r["next_due"]})
     return jsonify({"state": "completed"})
 
 
-@app.route("/api/tasks/<slug>/cancel", methods=["POST"])
-def task_cancel(slug):
-    db.cancel_recurrence(slug)
+@app.route("/api/tasks/<ref>/cancel", methods=["POST"])
+def task_cancel(ref):
+    db.cancel_recurrence(ref)
     return jsonify({"state": "completed"})
 
 
-@app.route("/api/tasks/<slug>/archive", methods=["POST"])
-def task_archive(slug):
-    if db.resolve_task(slug)["state"] == "archive":
+@app.route("/api/tasks/<ref>/archive", methods=["POST"])
+def task_archive(ref):
+    if db.resolve_task(ref)["state"] == "archive":
         return jsonify({"error": "Already archived"}), 400
-    db.move_task(slug, "archive")
+    db.move_task(ref, "archive")
     return jsonify({"state": "archive"})
 
 
-@app.route("/api/tasks/<slug>", methods=["DELETE"])
-def task_delete(slug):
-    db.delete_task(slug)
+@app.route("/api/tasks/<ref>", methods=["DELETE"])
+def task_delete(ref):
+    db.delete_task(ref)
     return jsonify({"deleted": True})
 
 
-@app.route("/api/tasks/<slug>/note", methods=["POST"])
-def task_note(slug):
+@app.route("/api/tasks/<ref>/note", methods=["POST"])
+def task_note(ref):
     data, err, code = require_json("text")
     if err:
         return err, code
-    db.add_note(slug, data["text"])
+    db.add_note(ref, data["text"])
     return jsonify({"ok": True})
 
 
-@app.route("/api/tasks/<slug>/notes/<int:note_id>", methods=["PATCH"])
-def task_note_update(slug, note_id):
+@app.route("/api/tasks/<ref>/notes/<int:note_id>", methods=["PATCH"])
+def task_note_update(ref, note_id):
     data, err, code = require_json("text")
     if err:
         return err, code
-    db.update_note(slug, note_id, data["text"])
+    db.update_note(ref, note_id, data["text"])
     return jsonify({"ok": True})
 
 
-@app.route("/api/tasks/<slug>/notes/<int:note_id>", methods=["DELETE"])
-def task_note_delete(slug, note_id):
-    db.delete_note(slug, note_id)
+@app.route("/api/tasks/<ref>/notes/<int:note_id>", methods=["DELETE"])
+def task_note_delete(ref, note_id):
+    db.delete_note(ref, note_id)
     return jsonify({"deleted": True})
 
 
-@app.route("/api/tasks/<slug>/due", methods=["POST"])
-def task_due(slug):
+@app.route("/api/tasks/<ref>/due", methods=["POST"])
+def task_due(ref):
     data = request.json or {}
-    d = db.set_due(slug, data.get("date"))
+    d = db.set_due(ref, data.get("date"))
     return jsonify({"due": d["due"]})
 
 
-@app.route("/api/tasks/<slug>/move", methods=["POST"])
-def task_move(slug):
+@app.route("/api/tasks/<ref>/move", methods=["POST"])
+def task_move(ref):
     data = request.json or {}
-    d = db.move_task(slug, data.get("state"))
+    d = db.move_task(ref, data.get("state"))
     return jsonify({"state": d["state"]})
 
 
-@app.route("/api/tasks/<slug>/reproject", methods=["POST"])
-def task_reproject(slug):
+@app.route("/api/tasks/<ref>/reproject", methods=["POST"])
+def task_reproject(ref):
     data = request.json or {}
-    return jsonify(task_to_dict(db.set_project(slug, data.get("project"))))
+    return jsonify(task_to_dict(db.set_project(ref, data.get("project"))))
 
 
-@app.route("/api/tasks/<slug>/tags", methods=["POST"])
-def task_tag(slug):
-    return jsonify(task_to_dict(db.tag_task(slug, (request.json or {}).get("tags"))))
+@app.route("/api/tasks/<ref>/tags", methods=["POST"])
+def task_tag(ref):
+    return jsonify(task_to_dict(db.tag_task(ref, (request.json or {}).get("tags"))))
 
 
-@app.route("/api/tasks/<slug>/tags", methods=["DELETE"])
-def task_untag(slug):
-    return jsonify(task_to_dict(db.untag_task(slug, (request.json or {}).get("tags"))))
+@app.route("/api/tasks/<ref>/tags", methods=["DELETE"])
+def task_untag(ref):
+    return jsonify(task_to_dict(db.untag_task(ref, (request.json or {}).get("tags"))))
 
 
-@app.route("/api/tasks/<slug>/reprioritize", methods=["POST"])
-def task_reprioritize(slug):
+@app.route("/api/tasks/<ref>/reprioritize", methods=["POST"])
+def task_reprioritize(ref):
     data = request.json or {}
     if data.get("priority") is None:
         return jsonify({"error": "priority required"}), 400
-    return jsonify(task_to_dict(db.set_priority(slug, data["priority"])))
+    return jsonify(task_to_dict(db.set_priority(ref, data["priority"])))
 
 
-@app.route("/api/tasks/<slug>/edit", methods=["POST"])
-def task_edit(slug):
+@app.route("/api/tasks/<ref>/edit", methods=["POST"])
+def task_edit(ref):
     data, err, code = require_json("text")
     if err:
         return err, code
-    db.set_description(slug, data["text"])
+    db.set_description(ref, data["text"])
     return jsonify({"ok": True})
 
 
-@app.route("/api/tasks/<slug>/sub", methods=["POST"])
-def task_sub(slug):
+@app.route("/api/tasks/<ref>/sub", methods=["POST"])
+def task_sub(ref):
     data, err, code = require_json("name")
     if err:
         return err, code
-    s = db.add_subtask(slug, data["name"], priority=data.get("priority"),
+    s = db.add_subtask(ref, data["name"], priority=data.get("priority"),
                        due=data.get("due"), description=data.get("description"))
-    return jsonify({"slug": s["slug"]}), 201
+    return jsonify({"ref": f"#{s['id']}"}), 201
 
 
-@app.route("/api/tasks/<slug>/subdone", methods=["POST"])
-def task_subdone(slug):
-    sub_slug = (request.json or {}).get("slug")
-    if not sub_slug:
-        return jsonify({"error": "slug required"}), 400
-    db.set_subtask_state(slug, sub_slug, "completed")
+@app.route("/api/tasks/<ref>/subdone", methods=["POST"])
+def task_subdone(ref):
+    sub_ref = (request.json or {}).get("sub")
+    if not sub_ref:
+        return jsonify({"error": "sub required"}), 400
+    db.set_subtask_state(ref, sub_ref, "completed")
     return jsonify({"ok": True})
 
 
-@app.route("/api/tasks/<slug>/subundo", methods=["POST"])
-def task_subundo(slug):
-    sub_slug = (request.json or {}).get("slug")
-    if not sub_slug:
-        return jsonify({"error": "slug required"}), 400
-    db.set_subtask_state(slug, sub_slug, "active")
+@app.route("/api/tasks/<ref>/subundo", methods=["POST"])
+def task_subundo(ref):
+    sub_ref = (request.json or {}).get("sub")
+    if not sub_ref:
+        return jsonify({"error": "sub required"}), 400
+    db.set_subtask_state(ref, sub_ref, "active")
     return jsonify({"ok": True})
 
 
-@app.route("/api/tasks/<slug>/sub/<sub_slug>", methods=["DELETE"])
-def task_subdelete(slug, sub_slug):
-    db.delete_subtask(slug, sub_slug)
+@app.route("/api/tasks/<ref>/sub/<sub_ref>", methods=["DELETE"])
+def task_subdelete(ref, sub_ref):
+    db.delete_subtask(ref, sub_ref)
     return jsonify({"deleted": True})
 
 
-@app.route("/api/tasks/<slug>/rename", methods=["POST"])
-def task_rename(slug):
+@app.route("/api/tasks/<ref>/rename", methods=["POST"])
+def task_rename(ref):
     data, err, code = require_json("name")
     if err:
         return err, code
-    return jsonify(task_to_dict(db.rename_task(slug, data["name"])))
+    return jsonify(task_to_dict(db.rename_task(ref, data["name"])))
 
 
-@app.route("/api/tasks/<slug>/subrename", methods=["POST"])
-def task_subrename(slug):
+@app.route("/api/tasks/<ref>/subrename", methods=["POST"])
+def task_subrename(ref):
     data = request.json or {}
-    if not data.get("slug") or not (data.get("name") or "").strip():
-        return jsonify({"error": "slug and name required"}), 400
-    s = db.rename_subtask(slug, data["slug"], data["name"])
-    return jsonify({"slug": s["slug"]})
+    if not data.get("sub") or not (data.get("name") or "").strip():
+        return jsonify({"error": "sub and name required"}), 400
+    s = db.rename_subtask(ref, data["sub"], data["name"])
+    return jsonify({"ref": f"#{s['id']}"})
 
 
 # ── Upcoming & Search ─────────────────────────────────────────────────────────
@@ -559,10 +557,10 @@ def get_ctx():
 
 @app.route("/api/ctx", methods=["POST"])
 def set_ctx():
-    slug = (request.json or {}).get("slug")
-    if not slug:
-        return jsonify({"error": "slug required"}), 400
-    return jsonify({"context": db.set_context(slug)})
+    ref = (request.json or {}).get("task")
+    if not ref:
+        return jsonify({"error": "task required"}), 400
+    return jsonify({"context": db.set_context(ref)})
 
 
 @app.route("/api/ctx", methods=["DELETE"])
@@ -588,7 +586,7 @@ def get_status():
             due_str = f", Due: {tk['due']}" if tk.get('due') else ""
             recur_str = f", Recur: {tk['recurrence']}d" if tk.get('recurrence') else ""
             tags_str = f", Tags: {' '.join('#' + t for t in tk['tags'])}" if tk.get('tags') else ""
-            tasks_md += f"- **{tk['name']}** (`{tk['slug']}`)\n  - Project: {tk['project']}, Priority: {tk['priority']}{due_str}{recur_str}{tags_str}\n"
+            tasks_md += f"- **{tk['name']}** (`#{tk['id']}`)\n  - Project: {tk['project']}, Priority: {tk['priority']}{due_str}{recur_str}{tags_str}\n"
 
     status_text = f"""# TOLEDO SYSTEM STATUS
 **Current Time:** {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -611,7 +609,7 @@ Priority is a number from 1 to 99; higher is more important:
 You can ask the Toledo AI to perform the following actions. When responding, provide a concise list of these operations that the user can paste into the Toledo chat bubble:
 
 - **Create Task**: `create_task(name, project="GEN", priority=50, due="YYYY-MM-DD", recur=0)`
-- **Complete Task**: `done_task(task_slug_or_name)`
+- **Complete Task**: `done_task(task_ref)`
 - **Add Note**: `add_note(task, text)`
 - **Set Due Date**: `set_due(task, due="YYYY-MM-DD")`
 - **Change Priority**: `reprioritize(task, priority)`
@@ -621,10 +619,10 @@ You can ask the Toledo AI to perform the following actions. When responding, pro
 - **Edit Description**: `edit_desc(task, text)`
 - **Rename Task**: `rename_task(task, new_name)`
 - **Add Subtask**: `add_subtask(parent_task, name, priority=50, due=None)`
-- **Complete Subtask**: `done_subtask(parent_task, subtask_slug)`
-- **Undo Subtask**: `undo_subtask(parent_task, subtask_slug)`
-- **Rename Subtask**: `rename_subtask(parent_task, subtask_slug, new_name)`
-- **Delete Subtask**: `delete_subtask(parent_task, subtask_slug)`
+- **Complete Subtask**: `done_subtask(parent_task, subtask_ref)`
+- **Undo Subtask**: `undo_subtask(parent_task, subtask_ref)`
+- **Rename Subtask**: `rename_subtask(parent_task, subtask_ref, new_name)`
+- **Delete Subtask**: `delete_subtask(parent_task, subtask_ref)`
 - **Move Task State**: `move_task(task, state="active|completed|archive")`
 - **Cancel Recurrence**: `cancel_recurrence(task)`
 - **Archive Task**: `archive_task(task)`
@@ -885,7 +883,7 @@ CHATTABLE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Partial name or slug"}
+                    "task": {"type": "string", "description": "Task #id or partial name"}
                 },
                 "required": ["task"]
             }
@@ -944,7 +942,7 @@ CHATTABLE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Parent task name/slug"},
+                    "task": {"type": "string", "description": "Parent task #id or name"},
                     "name": {"type": "string", "description": "Subtask name"},
                     "priority": {"type": ["integer", "string"], "default": 50, "description": "1-99, higher = more important, or a label like High"},
                     "due": {"type": "string", "description": "YYYY-MM-DD"}
@@ -961,8 +959,8 @@ CHATTABLE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Parent task name/slug"},
-                    "subtask": {"type": "string", "description": "Subtask name or slug"}
+                    "task": {"type": "string", "description": "Parent task #id or name"},
+                    "subtask": {"type": "string", "description": "Subtask #id or name"}
                 },
                 "required": ["task", "subtask"]
             }
@@ -976,8 +974,8 @@ CHATTABLE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Parent task name/slug"},
-                    "subtask": {"type": "string", "description": "Subtask name or slug"}
+                    "task": {"type": "string", "description": "Parent task #id or name"},
+                    "subtask": {"type": "string", "description": "Subtask #id or name"}
                 },
                 "required": ["task", "subtask"]
             }
@@ -1040,50 +1038,50 @@ def execute_chat_tool(name, args):
                                recurrence=args.get("recur"),
                                description=f"# {args['name']}\n\n_Created via Chat._\n",
                                tags=args.get("tags"), source=src)
-            return f"Success: Created task {d['slug']}"
+            return f"Success: Created task #{d['id']}"
 
         if name == "done_task":
             r = db.complete_task(args["task"], source=src)
             if r["recurring"]:
-                return f"Success: Recurring task {r['task']['slug']} advanced to {r['next_due']}"
-            return f"Success: Completed {r['task']['slug']}"
+                return f"Success: Recurring task #{r['task']['id']} advanced to {r['next_due']}"
+            return f"Success: Completed #{r['task']['id']}"
 
         if name == "add_note":
             d = db.add_note(args["task"], args["text"], source=src)
-            return f"Success: Added note to {d['slug']}"
+            return f"Success: Added note to #{d['id']}"
 
         if name == "set_due":
             due = args.get("due") or args.get("date")  # 'date' kept as a legacy alias
             if not due: return "Error: due is required (YYYY-MM-DD)"
             d = db.set_due(args["task"], due, source=src)
-            return f"Success: Set due date for {d['slug']} to {due}"
+            return f"Success: Set due date for #{d['id']} to {due}"
 
         if name == "update_description":
             d = db.set_description(args["task"], args["text"], source=src)
-            return f"Success: Updated description for {d['slug']}"
+            return f"Success: Updated description for #{d['id']}"
 
         if name == "add_subtask":
             s = db.add_subtask(args["task"], args["name"], priority=args.get("priority"),
                                due=args.get("due"), source=src)
-            return f"Success: Added subtask {s['slug']} to {s['parent']['slug']}"
+            return f"Success: Added subtask #{s['id']} to #{s['parent']['id']}"
 
         if name == "done_subtask":
             s = db.set_subtask_state(args["task"], args["subtask"], "completed",
                                      source=src, first_match=True)
-            return f"Success: Subtask {s['slug']} marked complete"
+            return f"Success: Subtask #{s['id']} marked complete"
 
         if name == "delete_subtask":
             s = db.delete_subtask(args["task"], args["subtask"], source=src)
-            return f"Success: Deleted subtask {s['slug']} ({s['state']})"
+            return f"Success: Deleted subtask #{s['id']} ({s['state']})"
 
         if name in ("tag_task", "untag_task"):
             write = db.tag_task if name == "tag_task" else db.untag_task
             d = write(args["task"], args.get("tags"), source=src)
-            return f"Success: {d['slug']} now has tags {', '.join(d['tags']) or '(none)'}"
+            return f"Success: #{d['id']} now has tags {', '.join(d['tags']) or '(none)'}"
 
         if name == "move_task":
             d = db.move_task(args["task"], args["state"], source=src)
-            return f"Success: Moved {d['slug']} to {d['state']}"
+            return f"Success: Moved #{d['id']} to {d['state']}"
 
     except Exception as e:
         return f"Error executing {name}: {e}"

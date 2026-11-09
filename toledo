@@ -345,12 +345,12 @@ def cmd_ctx(args):
     if ref == "show":
         ctx = get_context()
         print(f"Context: {ctx}" if ctx else "No context set."); return
-    # Resolve through the server so the context is the task's slug.
+    # Resolve through the server so the context is the task's #id.
     detail = call_tool("get_task", task=ref)
-    slug = next((ln.split(":", 1)[1].split()[0] for ln in detail.splitlines()
-                 if ln.startswith("Slug:")), ref)
-    set_context(slug)
-    print(f"✓ Context → '{slug}'")
+    tid = next((ln.split(":", 1)[1].split()[0] for ln in detail.splitlines()
+                if ln.startswith("ID:")), ref)
+    set_context(tid)
+    print(f"✓ Context → '{tid}'")
 
 
 def cmd_proj(args):

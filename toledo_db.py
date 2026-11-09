@@ -38,7 +38,7 @@ DEFAULT_PRIORITY = 50
 # Schema 3 repoints tasks whose project was stored as an unregistered string.
 # Schema 4 turns activity into a global event log (see the table below).
 # Schema 5 adds task tags.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -58,7 +58,6 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS tasks (
     id          INTEGER PRIMARY KEY,
     parent_id   INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
-    slug        TEXT NOT NULL,
     name        TEXT NOT NULL,
     state       TEXT NOT NULL DEFAULT 'active',
     priority    INTEGER NOT NULL DEFAULT 50,
@@ -69,16 +68,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS tasks_slug_top ON tasks(slug) WHERE parent_id IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS tasks_slug_sub ON tasks(parent_id, slug) WHERE parent_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state);
-
--- Former slugs (renames, legacy file-backend names) so old references resolve.
-CREATE TABLE IF NOT EXISTS task_aliases (
-    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    slug    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS task_aliases_slug ON task_aliases(slug);
 
 -- Free-form tags on top-level tasks: a tag exists while some task has it.
 -- Subtasks carry none of their own and show their parent's.
@@ -101,7 +91,7 @@ CREATE INDEX IF NOT EXISTS notes_task ON notes(task_id);
 -- The event log. scope says what an event is about; task events carry task_id,
 -- the rest name their target in ref (project code, glossary term, journal id).
 -- History outlives its task: deleting one only clears task_id, and task events
--- keep a slug/name snapshot in data. Its indexes are made in _upgrade.
+-- keep a name snapshot in data. Its indexes are made in _upgrade.
 CREATE TABLE IF NOT EXISTS activity (
     id      INTEGER PRIMARY KEY,
     task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
@@ -208,7 +198,7 @@ def _init(conn: sqlite3.Connection, path: Path) -> None:
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     old_glossary = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'glossary'").fetchone()
-    if row and (int(row[0]) < 4 or old_glossary):
+    if row and (int(row[0]) < 7 or old_glossary):
         _backup(conn, path, int(row[0]))
     # The web and MCP servers share one database; the write lock makes sure
     # only the first of them to start runs the legacy migration.
@@ -297,6 +287,32 @@ def _upgrade(conn) -> None:
         for term, canonical in conn.execute("SELECT term, canonical FROM glossary ORDER BY term").fetchall():
             _insert_legacy_glossary(conn, term, canonical)
         conn.execute("DROP TABLE glossary")
+    if "slug" in {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        # Schema 7: tasks are addressed by id alone. Event snapshots held
+        # slugs; swap them for names so history stays readable.
+        conn.executescript("""
+            UPDATE activity SET data = json_set(data, '$.name', replace(json_extract(data, '$.slug'), '-', ' '))
+                WHERE json_type(data, '$.slug') = 'text' AND json_type(data, '$.name') IS NULL;
+            UPDATE activity SET data = json_set(data, '$.parent', COALESCE(
+                    (SELECT p.name FROM tasks p WHERE p.slug = json_extract(activity.data, '$.parent')
+                        AND p.parent_id IS NULL),
+                    replace(json_extract(activity.data, '$.parent'), '-', ' ')))
+                WHERE json_type(data, '$.parent') = 'text';
+            UPDATE activity SET data = json_set(data, '$.subtask', COALESCE(
+                    (SELECT t.name FROM tasks t WHERE t.id = json_extract(activity.data, '$.subtask_id')),
+                    replace(json_extract(activity.data, '$.subtask'), '-', ' ')))
+                WHERE json_type(data, '$.subtask') = 'text';
+            UPDATE activity SET data = json_set(data,
+                    '$.old', replace(json_extract(data, '$.old'), '-', ' '),
+                    '$.new', replace(json_extract(data, '$.new'), '-', ' '))
+                WHERE action = 'subtask_renamed';
+            UPDATE activity SET data = json_remove(data, '$.slug')
+                WHERE json_type(data, '$.slug') IS NOT NULL;
+            DROP INDEX IF EXISTS tasks_slug_top;
+            DROP INDEX IF EXISTS tasks_slug_sub;
+            DROP TABLE IF EXISTS task_aliases;
+            ALTER TABLE tasks DROP COLUMN slug;
+        """)
     if version < SCHEMA_VERSION:
         _log_event(conn, "system", "schema_upgraded", from_version=version, to_version=SCHEMA_VERSION)
     conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
@@ -421,23 +437,6 @@ def validate_date(value: str) -> str:
     return value
 
 
-def _unique_slug(conn, name: str, parent_id: int | None, exclude_id: int | None = None) -> str:
-    base = slugify(name)
-    slug, n = base, 2
-    while True:
-        if parent_id is None:
-            row = conn.execute(
-                "SELECT id FROM tasks WHERE parent_id IS NULL AND slug = ?", (slug,)
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT id FROM tasks WHERE parent_id = ? AND slug = ?", (parent_id, slug)
-            ).fetchone()
-        if not row or row["id"] == exclude_id:
-            return slug
-        slug, n = f"{base}-{n}", n + 1
-
-
 # ── Event log ─────────────────────────────────────────────────────────────────
 
 SCOPES = ["task", "project", "tag", "glossary", "journal", "context", "system"]
@@ -454,19 +453,19 @@ def set_default_source(source: str | None) -> None:
 
 def _insert_event(conn, scope: str, action: str, task_id: int | None = None,
                   ref: str | None = None, ts: str | None = None, **data) -> str:
-    """Append one event. An event about a task snapshots its slug and name
-    (and its parent's slug, for a subtask) so it stays readable after the
+    """Append one event. An event about a task snapshots its name
+    (and its parent's name, for a subtask) so it stays readable after the
     task is deleted. Returns the timestamp used."""
     ts = ts or now_iso()
     if data.get("source") is None:
         data["source"] = _default_source
     if task_id is not None:
         t = conn.execute(
-            "SELECT t.slug, t.name, p.slug AS parent FROM tasks t "
+            "SELECT t.name, p.name AS parent FROM tasks t "
             "LEFT JOIN tasks p ON p.id = t.parent_id WHERE t.id = ?", (task_id,)
         ).fetchone()
         if t:
-            data = {"slug": t["slug"], "name": t["name"], "parent": t["parent"], **data}
+            data = {"name": t["name"], "parent": t["parent"], **data}
     data = {k: v for k, v in data.items() if v is not None}
     conn.execute(
         "INSERT INTO activity (task_id, ts, scope, action, ref, data) VALUES (?, ?, ?, ?, ?, ?)",
@@ -498,7 +497,6 @@ def _base_dict(row) -> dict:
     return {
         "id":         row["id"],
         "parent_id":  row["parent_id"],
-        "slug":       row["slug"],
         "name":       row["name"],
         "state":      row["state"],
         "priority":   row["priority"],
@@ -539,7 +537,7 @@ def _tags(conn, task_ids) -> dict[int, list[str]]:
 
 def _dicts(conn, rows) -> list[dict]:
     """Task dicts with their tags and subtasks, and a subtask's parent
-    (slug, name). A subtask's tags are its parent's."""
+    (id, name). A subtask's tags are its parent's."""
     tasks = [_base_dict(r) for r in rows]
     tags = _tags(conn, [t["parent_id"] or t["id"] for t in tasks])
     for t in tasks:
@@ -547,9 +545,9 @@ def _dicts(conn, rows) -> list[dict]:
     subs = _subtasks(conn, [t["id"] for t in tasks])
     parent_ids = sorted({t["parent_id"] for t in tasks if t["parent_id"]})
     parents = {
-        r["id"]: {"slug": r["slug"], "name": r["name"]}
+        r["id"]: {"id": r["id"], "name": r["name"]}
         for r in conn.execute(
-            f"SELECT id, slug, name FROM tasks WHERE id IN ({','.join('?' * len(parent_ids))})",
+            f"SELECT id, name FROM tasks WHERE id IN ({','.join('?' * len(parent_ids))})",
             parent_ids,
         )
     } if parent_ids else {}
@@ -561,7 +559,7 @@ def _dicts(conn, rows) -> list[dict]:
 
 
 # Keys _insert_event adds to describe the task an event belongs to.
-_SNAPSHOT_KEYS = {"slug", "name", "parent"}
+_SNAPSHOT_KEYS = {"name", "parent"}
 
 
 def _detail(conn, row) -> dict:
@@ -603,13 +601,13 @@ _STATE_ORDER = "CASE state WHEN 'active' THEN 0 WHEN 'completed' THEN 1 ELSE 2 E
 
 
 def _match(conn, ref: str):
-    """Return (row, partial): the task ref names, plus every row it partially
-    matched with the chosen one first (empty when ref named a task exactly by
-    id, slug, or former slug).
+    """Return (row, partial): the task ref names, plus every row it matched
+    by name with the chosen one first (empty when ref named exactly one
+    task, by id or by full name).
 
-    '#id' names any task or subtask by id and 'parent/child' names a subtask;
-    any other ref names a top-level task. A 'parent/child' ref that names no
-    subtask is tried as a whole, since task names can contain '/'."""
+    '#id' names any task or subtask by id and 'parent/child' names a subtask
+    by name; any other ref names a top-level task. A 'parent/child' ref that
+    names no subtask is tried as a whole, since task names can contain '/'."""
     ref = (ref or "").strip()
     if not ref:
         return None, []
@@ -621,7 +619,7 @@ def _match(conn, ref: str):
         if parent and tail.strip():
             subs = _find_subtasks(conn, parent["id"], tail, STATES)
             if len(subs) > 1:
-                names = ", ".join(f"{parent['slug']}/{r['slug']} ({r['state']})" for r in subs)
+                names = ", ".join(f"#{r['id']} {r['name']} ({r['state']})" for r in subs)
                 raise ToledoError(f"'{ref}' is ambiguous — matches: {names}")
             if subs:
                 # Other top-level tasks the parent part also matched.
@@ -638,36 +636,18 @@ def _match_top(conn, ref: str):
         return conn.execute(
             "SELECT * FROM tasks WHERE id = ? AND parent_id IS NULL", (int(ref[1:]),)
         ).fetchone(), []
-    row = conn.execute(
-        "SELECT * FROM tasks WHERE parent_id IS NULL AND slug = ?", (ref.lower(),)
-    ).fetchone()
-    if row:
-        return row, []
-    row = conn.execute(
-        "SELECT t.* FROM task_aliases a JOIN tasks t ON t.id = a.task_id "
-        "WHERE t.parent_id IS NULL AND a.slug = ? "
-        f"ORDER BY {_STATE_ORDER}, t.id DESC LIMIT 1",
-        (ref.lower(),),
-    ).fetchone()
-    if row:
-        return row, []
-    # Partial match on slug, name, or former slugs; active first, then highest priority.
-    needle = _norm(ref)
-    if not needle:
-        return None, []
+    # Full name, then partial name; active first, then highest priority.
     rows = conn.execute(
         f"SELECT * FROM tasks WHERE parent_id IS NULL ORDER BY {_STATE_ORDER}, priority DESC, id"
     ).fetchall()
-    matches = [r for r in rows if needle in _norm(r["slug"]) or needle in _norm(r["name"])]
-    if matches:
-        return matches[0], matches
-    alias = conn.execute(
-        "SELECT t.* FROM task_aliases a JOIN tasks t ON t.id = a.task_id "
-        "WHERE t.parent_id IS NULL AND a.slug LIKE ? "
-        f"ORDER BY {_STATE_ORDER}, t.priority DESC, t.id LIMIT 1",
-        (f"%{needle.replace(' ', '-')}%",),
-    ).fetchone()
-    return alias, [alias] if alias else []
+    exact = [r for r in rows if r["name"].lower() == ref.lower()]
+    if exact:
+        return exact[0], exact if len(exact) > 1 else []
+    needle = _norm(ref)
+    if not needle:
+        return None, []
+    matches = [r for r in rows if needle in _norm(r["name"])]
+    return (matches[0], matches) if matches else (None, [])
 
 
 def _find_row(conn, ref: str):
@@ -685,13 +665,13 @@ def _resolve_parent(conn, ref: str):
     """_resolve for a ref that must name a top-level task: a subtask's parent."""
     row = _resolve(conn, ref)
     if row["parent_id"]:
-        raise ToledoError(f"'{row['slug']}' is a subtask; subtasks can't have subtasks")
+        raise ToledoError(f"#{row['id']} is a subtask; subtasks can't have subtasks")
     return row
 
 
 def _reject_subtask(row, why: str) -> None:
     if row["parent_id"]:
-        raise ToledoError(f"'{row['slug']}' is a subtask; {why}")
+        raise ToledoError(f"#{row['id']} is a subtask; {why}")
 
 
 def find_task(ref: str) -> dict | None:
@@ -717,7 +697,7 @@ def get_task(ref: str) -> dict:
 
 
 def _find_subtasks(conn, parent_id: int, ref: str, states=SUBTASK_STATES) -> list:
-    """Exact slug matches if any, otherwise partial matches on slug/name/alias."""
+    """A '#id', else exact name matches if any, otherwise partial name matches."""
     ref = (ref or "").strip()
     if not ref:
         raise ToledoError("subtask is required")
@@ -726,20 +706,13 @@ def _find_subtasks(conn, parent_id: int, ref: str, states=SUBTASK_STATES) -> lis
         f"SELECT * FROM tasks WHERE parent_id = ? AND state IN ({marks}) ORDER BY priority DESC, id",
         (parent_id, *states),
     ).fetchall()
-    exact = [r for r in rows if r["slug"] == ref.lower()]
+    if ref.startswith("#") and ref[1:].isdigit():
+        return [r for r in rows if r["id"] == int(ref[1:])]
+    exact = [r for r in rows if r["name"].lower() == ref.lower()]
     if exact:
         return exact
-    ids = {r["id"] for r in rows}
-    aliased = {
-        a["task_id"] for a in conn.execute(
-            "SELECT a.task_id FROM task_aliases a JOIN tasks t ON t.id = a.task_id "
-            "WHERE t.parent_id = ? AND a.slug = ?", (parent_id, ref.lower()),
-        )
-    } & ids
-    if aliased:
-        return [r for r in rows if r["id"] in aliased]
     needle = _norm(ref)
-    return [r for r in rows if needle in _norm(r["slug"]) or needle in _norm(r["name"])]
+    return [r for r in rows if needle in _norm(r["name"])]
 
 
 def _resolve_subtask(conn, parent_id: int, ref: str, states=SUBTASK_STATES, first=False):
@@ -748,7 +721,7 @@ def _resolve_subtask(conn, parent_id: int, ref: str, states=SUBTASK_STATES, firs
         scope = "active subtask" if list(states) == ["active"] else "subtask"
         raise NotFound(f"No {scope} matching '{ref}'")
     if len(matches) > 1 and not first:
-        names = ", ".join(f"{r['slug']} ({r['state']})" for r in matches)
+        names = ", ".join(f"#{r['id']} {r['name']} ({r['state']})" for r in matches)
         raise ToledoError(f"'{ref}' is ambiguous — matches: {names}")
     return matches[0]
 
@@ -788,7 +761,7 @@ def upcoming(days: int = 7) -> list[dict]:
 
 
 def search(query: str) -> list[dict]:
-    """Tasks whose name/slug, tags, description, or notes contain query.
+    """Tasks whose name, tags, description, or notes contain query.
     Each result carries 'hits': which of name/tags/description/notes matched."""
     q = (query or "").strip().lower()
     if not q:
@@ -813,7 +786,7 @@ def search(query: str) -> list[dict]:
         hits_by_id = {}
         for r in rows:
             hits = []
-            if q in r["slug"] or q in r["name"].lower() or (qn and qn in _norm(r["name"])):
+            if q in r["name"].lower() or (qn and qn in _norm(r["name"])):
                 hits.append("name")
             if r["id"] in tagged:
                 hits.append("tags")
@@ -921,8 +894,8 @@ def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = 
     project's own events."""
     with connect() as c:
         where, params = _activity_filter(c, since, until, scope, task, action, project, source)
-        sql = ("SELECT a.*, t.slug AS t_slug, t.name AS t_name, t.project AS t_project, "
-               "t.state AS t_state, p.slug AS p_slug, p.name AS p_name "
+        sql = ("SELECT a.*, t.id AS t_id, t.name AS t_name, t.project AS t_project, "
+               "t.state AS t_state, p.id AS p_id, p.name AS p_name "
                f"{_ACTIVITY_FROM}{where}")
         sql += (" ORDER BY a.ts ASC, a.id ASC" if oldest_first else " ORDER BY a.ts DESC, a.id DESC")
         sql += " LIMIT ? OFFSET ?"
@@ -934,7 +907,7 @@ def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = 
             # 'name' is the project's.
             about_task = r["scope"] in ("task", "context")
             snap = {k: data.pop(k, None) if about_task else None for k in _SNAPSHOT_KEYS}
-            exists = r["t_slug"] is not None
+            exists = r["t_id"] is not None
             out.append({
                 "id":      r["id"],
                 "ts":      r["ts"],
@@ -943,15 +916,13 @@ def list_activity(limit: int | None = 100, offset: int = 0, since: str | None = 
                 "ref":     r["ref"],
                 "task_id": r["task_id"],
                 # The task as it is now, or as it was when logged if it is gone.
-                "slug":    r["t_slug"] if exists else snap["slug"],
                 "name":    r["t_name"] if exists else snap["name"],
-                "parent":  r["p_slug"] if exists else snap["parent"],
-                "parent_name": r["p_name"],
+                "parent":  r["p_name"] if exists else snap["parent"],
                 "project": r["t_project"],
                 "state":   r["t_state"],
-                # Slug of the top-level task to open, while it exists.
-                "open":    (r["p_slug"] or r["t_slug"]) if exists else None,
-                "deleted": r["task_id"] is None and snap["slug"] is not None,
+                # Ref of the top-level task to open, while it exists.
+                "open":    f"#{r['p_id'] or r['t_id']}" if exists else None,
+                "deleted": r["task_id"] is None and snap["name"] is not None,
                 "data":    data,
             })
         return out
@@ -973,11 +944,10 @@ def create_task(name: str, project: str | None = None, priority: int | str | Non
     ts = now_iso()
     with connect() as c:
         project = _project_code(c, project) if (project or "").strip() else _default_project(c)
-        slug = _unique_slug(c, name, None)
         cur = c.execute(
-            "INSERT INTO tasks (slug, name, state, priority, project, due, recurrence, "
-            "description, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
-            (slug, name, priority, project, due or None, recurrence,
+            "INSERT INTO tasks (name, state, priority, project, due, recurrence, "
+            "description, created_at, updated_at) VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?)",
+            (name, priority, project, due or None, recurrence,
              description or "", ts, ts),
         )
         tid = cur.lastrowid
@@ -1031,7 +1001,7 @@ def cancel_recurrence(ref: str, source: str | None = None) -> dict:
     with connect() as c:
         row = _resolve(c, ref)
         if not row["recurrence"]:
-            raise ToledoError(f"'{row['slug']}' is not a recurring task")
+            raise ToledoError(f"#{row['id']} is not a recurring task")
         _touch(c, row["id"], recurrence=None, state="completed")
         _log_task(c, row["id"], "recurring_cancelled", source=source)
         _clear_context_if(c, row["id"])
@@ -1039,16 +1009,16 @@ def cancel_recurrence(ref: str, source: str | None = None) -> dict:
 
 
 def _snapshot_history(conn, task_id: int) -> None:
-    """Stamp slug/name onto a task's (and its subtasks') events that predate
+    """Stamp name onto a task's (and its subtasks') events that predate
     snapshots, before a delete leaves them without a task_id."""
     for t in conn.execute(
-        "SELECT t.id, t.slug, t.name, p.slug AS parent FROM tasks t "
+        "SELECT t.id, t.name, p.name AS parent FROM tasks t "
         "LEFT JOIN tasks p ON p.id = t.parent_id WHERE t.id = ? OR t.parent_id = ?", (task_id, task_id)
     ).fetchall():
         conn.execute(
-            "UPDATE activity SET data = json_set(data, '$.slug', ?, '$.name', ?) "
-            "WHERE task_id = ? AND json_extract(data, '$.slug') IS NULL",
-            (t["slug"], t["name"], t["id"]),
+            "UPDATE activity SET data = json_set(data, '$.name', ?) "
+            "WHERE task_id = ? AND json_extract(data, '$.name') IS NULL",
+            (t["name"], t["id"]),
         )
         if t["parent"]:
             conn.execute(
@@ -1087,10 +1057,7 @@ def rename_task(ref: str, name: str, source: str | None = None) -> dict:
         raise ToledoError("name is required")
     with connect() as c:
         row = _resolve(c, ref)
-        slug = _unique_slug(c, name, row["parent_id"], exclude_id=row["id"])
-        if slug != row["slug"]:
-            c.execute("INSERT INTO task_aliases (task_id, slug) VALUES (?, ?)", (row["id"], row["slug"]))
-        _touch(c, row["id"], name=name, slug=slug)
+        _touch(c, row["id"], name=name)
         _log_task(c, row["id"], "renamed", old=row["name"], new=name, source=source)
         return _dicts(c, [c.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()])[0]
 
@@ -1252,16 +1219,15 @@ def add_subtask(ref: str, name: str, priority: int | str | None = None, due: str
     ts = now_iso()
     with connect() as c:
         parent = _resolve_parent(c, ref)
-        slug = _unique_slug(c, name, parent["id"])
         cur = c.execute(
-            "INSERT INTO tasks (parent_id, slug, name, state, priority, project, due, "
-            "description, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
-            (parent["id"], slug, name, priority, parent["project"],
+            "INSERT INTO tasks (parent_id, name, state, priority, project, due, "
+            "description, created_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+            (parent["id"], name, priority, parent["project"],
              due or None, description or "", ts, ts),
         )
         _log_task(c, cur.lastrowid, "created", ts, state="active", priority=priority, due=due or None,
                   source=source)
-        _log_task(c, parent["id"], "subtask_created", ts, subtask=slug, subtask_id=cur.lastrowid,
+        _log_task(c, parent["id"], "subtask_created", ts, subtask=name, subtask_id=cur.lastrowid,
                   source=source)
         return {"parent": _base_dict(parent),
                 **_base_dict(c.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone())}
@@ -1279,7 +1245,7 @@ def set_subtask_state(ref: str, sub_ref: str, state: str, source: str | None = N
         _touch(c, sub["id"], state=state)
         _log_task(c, sub["id"], "state_changed", from_state=other, to_state=state, source=source)
         action = "subtask_completed" if state == "completed" else "subtask_reopened"
-        _log_task(c, parent["id"], action, subtask=sub["slug"], subtask_id=sub["id"], source=source)
+        _log_task(c, parent["id"], action, subtask=sub["name"], subtask_id=sub["id"], source=source)
         return {"parent": _base_dict(parent), **_base_dict(sub), "state": state}
 
 
@@ -1290,14 +1256,11 @@ def rename_subtask(ref: str, sub_ref: str, name: str, source: str | None = None)
     with connect() as c:
         parent = _resolve_parent(c, ref)
         sub = _resolve_subtask(c, parent["id"], sub_ref)
-        slug = _unique_slug(c, name, parent["id"], exclude_id=sub["id"])
-        if slug != sub["slug"]:
-            c.execute("INSERT INTO task_aliases (task_id, slug) VALUES (?, ?)", (sub["id"], sub["slug"]))
-        _touch(c, sub["id"], name=name, slug=slug)
+        _touch(c, sub["id"], name=name)
         _log_task(c, sub["id"], "renamed", old=sub["name"], new=name, source=source)
-        _log_task(c, parent["id"], "subtask_renamed", old=sub["slug"], new=slug, subtask_id=sub["id"],
+        _log_task(c, parent["id"], "subtask_renamed", old=sub["name"], new=name, subtask_id=sub["id"],
                   source=source)
-        return {"parent": _base_dict(parent), "slug": slug, "name": name}
+        return {"parent": _base_dict(parent), "id": sub["id"], "name": name}
 
 
 def delete_subtask(ref: str, sub_ref: str, source: str | None = None) -> dict:
@@ -1307,7 +1270,7 @@ def delete_subtask(ref: str, sub_ref: str, source: str | None = None) -> dict:
         _log_task(c, sub["id"], "deleted", state=sub["state"], source=source)
         _snapshot_history(c, sub["id"])
         c.execute("DELETE FROM tasks WHERE id = ?", (sub["id"],))
-        _log_task(c, parent["id"], "subtask_deleted", subtask=sub["slug"], subtask_id=sub["id"],
+        _log_task(c, parent["id"], "subtask_deleted", subtask=sub["name"], subtask_id=sub["id"],
                   state=sub["state"], source=source)
         return {"parent": _base_dict(parent), **_base_dict(sub)}
 
@@ -1826,8 +1789,8 @@ def get_context() -> str | None:
         row = c.execute("SELECT value FROM meta WHERE key = 'context'").fetchone()
         if not row or not row["value"]:
             return None
-        t = c.execute("SELECT slug FROM tasks WHERE id = ?", (int(row["value"]),)).fetchone()
-        return t["slug"] if t else None
+        t = c.execute("SELECT id FROM tasks WHERE id = ?", (int(row["value"]),)).fetchone()
+        return f"#{t['id']}" if t else None
 
 
 def set_context(ref: str | None, source: str | None = None) -> str | None:
@@ -1844,7 +1807,7 @@ def set_context(ref: str | None, source: str | None = None) -> str | None:
         c.execute("INSERT OR REPLACE INTO meta VALUES ('context', ?)", (str(row["id"]),))
         if row["id"] != old_id:
             _log_context(c, "context_set", row["id"], source=source)
-        return row["slug"]
+        return f"#{row['id']}"
 
 
 def _log_context(conn, action: str, task_id: int, **data) -> None:
@@ -1925,15 +1888,13 @@ def _migrate_task(conn, folder: Path, state: str, parent: dict | None) -> int:
     updated = max(stamps) if stamps else mtime
 
     parent_id = parent["id"] if parent else None
-    slug = _unique_slug(conn, name, parent_id)
     cur = conn.execute(
-        "INSERT INTO tasks (parent_id, slug, name, state, priority, project, due, recurrence, "
-        "description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (parent_id, slug, name, state, info["priority"], project, due, recurrence,
+        "INSERT INTO tasks (parent_id, name, state, priority, project, due, recurrence, "
+        "description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (parent_id, name, state, info["priority"], project, due, recurrence,
          desc, created, updated),
     )
     tid = cur.lastrowid
-    conn.execute("INSERT INTO task_aliases (task_id, slug) VALUES (?, ?)", (tid, folder.name.lower()))
 
     for e in activity:
         e = dict(e)
@@ -1988,8 +1949,7 @@ def migrate_from_files(conn, tasks_dir: Path, context_file: Path | None = None) 
         sd = tasks_dir / state
         if not sd.is_dir():
             continue
-        # Oldest first, so where two legacy tasks share a name the older one
-        # keeps the bare slug and the newer one gets the -2 suffix.
+        # Oldest first, so ids follow age.
         folders = sorted((f for f in sd.iterdir() if f.is_dir()), key=lambda f: f.stat().st_mtime)
         for folder in folders:
             slug_to_id[folder.name] = _migrate_task(conn, folder, state, None)

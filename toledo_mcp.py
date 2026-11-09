@@ -176,7 +176,7 @@ def fmt_task_line(d: dict) -> str:
     tags = "".join(f" #{t}" for t in d.get("tags") or [])
     return (
         f"[{d['pri_label']:10s}] [{d['project_name']:12s}] {d['name']}{tags}"
-        f"  ({d['slug']}){due}{rec}{subs}{upd}"
+        f"  (#{d['id']}){due}{rec}{subs}{upd}"
     )
 
 
@@ -188,6 +188,8 @@ _ID_KEYS = {"note_id", "history_id", "subtask_id", "into", "old_text"}
 
 
 def fmt_event_fields(fields: dict) -> str:
+    if "subtask" in fields and "subtask_id" in fields:
+        fields = {**fields, "subtask": f"#{fields['subtask_id']}"}
     rest = {k: db.project_name(v) if k in _PROJECT_KEYS else ",".join(v) if isinstance(v, list) else v
             for k, v in fields.items() if k not in _ID_KEYS}
     return "  " + "  ".join(f"{k}={v}" for k, v in rest.items()) if rest else ""
@@ -196,8 +198,8 @@ def fmt_event_fields(fields: dict) -> str:
 def fmt_event_line(e: dict) -> str:
     """One list_activity event: when, what, and the task or other target."""
     ts = e["ts"][:16].replace("T", " ")
-    if e["slug"]:
-        target = f"{e['name']} [{e['parent'] + '/' if e['parent'] else ''}{e['slug']}]"
+    if e["name"]:
+        target = f"{e['name']} [#{e['task_id']}]" if e["task_id"] else e["name"]
         if e["deleted"]:
             target += " (deleted)"
     elif e["scope"] == "project":
@@ -215,7 +217,7 @@ def fmt_event_line(e: dict) -> str:
 def fmt_task_detail(d: dict) -> str:
     lines = [
         f"# {d['name']}",
-        f"Slug:     {task_ref(d)}  (#{d['id']})",
+        f"ID:       #{d['id']}",
         f"State:    {d['state']}",
         f"Priority: {d['priority']} — {d['pri_label']}",
         f"Project:  {d['project_name']}",
@@ -223,7 +225,7 @@ def fmt_task_detail(d: dict) -> str:
     if d.get("tags"):
         lines.append(f"Tags:     {' '.join('#' + t for t in d['tags'])}")
     if d.get("parent"):
-        lines.insert(2, f"Parent:   {d['parent']['name']}  ({d['parent']['slug']})")
+        lines.insert(2, f"Parent:   {d['parent']['name']}  (#{d['parent']['id']})")
     if d.get("updated"):
         lines.append(f"Updated:  {d['updated'][:16].replace('T', ' ')}")
     if d["due"]:
@@ -235,7 +237,7 @@ def fmt_task_detail(d: dict) -> str:
         lines.append("\n## Subtasks")
         for s in d["subtasks"]:
             mark = "✓" if s["state"] == "completed" else "○"
-            lines.append(f"  {mark} {s['name']}  ({d['slug']}/{s['slug']}, #{s['id']})")
+            lines.append(f"  {mark} {s['name']}  (#{s['id']})")
 
     if d.get("description", "").strip():
         lines.append("\n## Description")
@@ -296,9 +298,8 @@ def tag(d: dict) -> str:
 
 
 def task_ref(d: dict) -> str:
-    """A ref that names d: its slug, or 'parent/child' for a subtask."""
-    parent = d.get("parent")
-    return f"{parent['slug']}/{d['slug']}" if parent else d["slug"]
+    """A ref that names d: '#id', for a task or a subtask."""
+    return f"#{d['id']}"
 
 
 def ok(text: str) -> list[types.TextContent]:
@@ -314,8 +315,8 @@ def err(text: str) -> list[types.TextContent]:
 # Sent to the client on connect. Keep it short: it lands in the model's context
 # every session, and the prompts themselves are fetched on demand.
 SERVER_INSTRUCTIONS = """\
-Toledo is the user's task manager. Tasks are addressed by partial name or slug, and projects by name.
-Every task tool also works on a subtask, addressed as 'parent/child' or by the '#id' get_task shows.
+Toledo is the user's task manager. Tasks are addressed by '#id' (as shown in listings) or partial name, and projects by name.
+Every task tool also works on a subtask, addressed by its '#id' (or 'parent/child' by name).
 Priority is 1–99 and higher is more important (75 high, 50 medium, 25 low). Writes also accept the
 labels Ultra High, High, Med-High, Medium, Med-Low, Low and Very Low, in any case.
 Besides its one project, a task can carry any number of free-form tags (lowercase, shown as #tag),
@@ -379,8 +380,8 @@ BATCH_OPS = {
 # ── Tool definitions ──────────────────────────────────────────────────────────
 
 TASK_REF = {"type": "string", "description": (
-    "Task: partial name or slug. A subtask: 'parent/child' (e.g. 'garage/buy paint'), "
-    "or '#id' as shown in get_task")}
+    "Task: '#id' as shown in listings (preferred), or a partial name. A subtask: its '#id', "
+    "or 'parent/child' by name (e.g. 'garage/buy paint')")}
 
 TAGS = {"type": ["array", "string"], "items": {"type": "string"},
         "description": "Tags, e.g. [\"errands\", \"weekend\"] or \"errands, weekend\"; "
@@ -614,7 +615,7 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task":     {"type": "string", "description": "Parent task (partial name or slug)"},
+                    "task":     {"type": "string", "description": "Parent task ('#id' or partial name)"},
                     "name":     {"type": "string"},
                     "priority": {"type": ["integer", "string"], "default": 50, "description": "1–99, higher = more important, or a label like High"},
                     "due":      {"type": "string", "description": "YYYY-MM-DD"},
@@ -632,7 +633,7 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "task":    {"type": "string", "description": "Parent task"},
-                    "subtask": {"type": "string", "description": "Partial subtask name or slug"},
+                    "subtask": {"type": "string", "description": "Subtask '#id' or partial name"},
                 },
                 "required": ["task", "subtask"],
             },
@@ -647,7 +648,7 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "task":    {"type": "string", "description": "Parent task"},
-                    "subtask": {"type": "string", "description": "Partial subtask name or slug"},
+                    "subtask": {"type": "string", "description": "Subtask '#id' or partial name"},
                 },
                 "required": ["task", "subtask"],
             },
@@ -1060,7 +1061,7 @@ def _document_batch_ops(tools: list[types.Tool]) -> None:
 # Applied only when the canonical key is absent, so real params (e.g. the
 # 'due' on create_task/add_subtask) are never overridden.
 _ARG_ALIASES_ALL = {
-    "task_id": "task", "task_name": "task", "slug": "task", "id": "task",
+    "task_id": "task", "task_name": "task", "id": "task",
 }
 _ARG_ALIASES = {
     "rename_task": {"new_name": "name", "title": "name"},
@@ -1142,7 +1143,7 @@ async def _run(name: str, arguments: dict) -> str:
         listed = ", ".join(f"{tag(o)} ({o['state']})" for o in others[:3])
         more = f" and {len(others) - 3} more" if len(others) > 3 else ""
         text += (f"\n  ⚠ '{args['task']}' also matches {listed}{more}. "
-                 f"Use a slug if you meant one of those.")
+                 f"Use its #id if you meant one of those.")
     return text
 
 
@@ -1162,16 +1163,16 @@ def _create_task(args: dict) -> tuple[dict, str]:
     # rather than failing the create.
     if (args.get("note") or "").strip():
         try:
-            db.add_note(d["slug"], args["note"])
+            db.add_note(f"#{d['id']}", args["note"])
             lines.append("  + note")
         except ValueError as e:
             lines.append(f"  ✗ note: {e}")
     for sub in args.get("subtasks") or []:
         sub = {"name": sub} if isinstance(sub, str) else sub
         try:
-            s = db.add_subtask(d["slug"], sub.get("name", ""),
+            s = db.add_subtask(f"#{d['id']}", sub.get("name", ""),
                                priority=sub.get("priority"), due=sub.get("due"))
-            lines.append(f"  + subtask {s['name']} [{d['slug']}/{s['slug']}]")
+            lines.append(f"  + subtask {s['name']} [#{s['id']}]")
         except ValueError as e:
             lines.append(f"  ✗ subtask {sub.get('name', '?')}: {e}")
     return d, "\n".join(lines)
@@ -1182,7 +1183,7 @@ async def _apply_changes(changes) -> str:
         changes = json.loads(changes)
     if not isinstance(changes, list) or not changes:
         raise ValueError("changes must be a non-empty list of {op, ...args} objects")
-    labels: dict[str, str | None] = {}   # label → slug, or None if its create failed
+    labels: dict[str, str | None] = {}   # label → #id, or None if its create failed
     lines, failed = [], 0
     for i, change in enumerate(changes, 1):
         change = dict(change) if isinstance(change, dict) else {}
@@ -1204,7 +1205,7 @@ async def _apply_changes(changes) -> str:
             if op == "create_task":
                 d, text = _create_task(await _prepare(op, change))
                 if label:
-                    labels[label] = d["slug"]
+                    labels[label] = f"#{d['id']}"
             else:
                 text = await _run(op, change)
             lines.append(f"✓ {head}: {text}")
@@ -1341,17 +1342,17 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
     if name == "add_subtask":
         s = db.add_subtask(args["task"], args["name"],
                            priority=args.get("priority"), due=args.get("due"))
-        return ok(f"Subtask created: {s['name']} [{s['parent']['slug']}/{s['slug']}] under {tag(s['parent'])}")
+        return ok(f"Subtask created: {s['name']} [#{s['id']}] under {tag(s['parent'])}")
 
     # ── done_subtask ──────────────────────────────────────────────────────────
     if name == "done_subtask":
         s = db.set_subtask_state(args["task"], args["subtask"], "completed", first_match=True)
-        return ok(f"✓ Subtask done: {s['name']} [{s['slug']}] under {tag(s['parent'])}")
+        return ok(f"✓ Subtask done: {s['name']} [#{s['id']}] under {tag(s['parent'])}")
 
     # ── delete_subtask ────────────────────────────────────────────────────────
     if name == "delete_subtask":
         s = db.delete_subtask(args["task"], args["subtask"])
-        return ok(f"🗑 Deleted subtask: {s['name']} [{s['slug']}, {s['state']}] under {tag(s['parent'])}")
+        return ok(f"🗑 Deleted subtask: {s['name']} [#{s['id']}, {s['state']}] under {tag(s['parent'])}")
 
     # ── search_tasks ──────────────────────────────────────────────────────────
     if name == "search_tasks":
@@ -1747,7 +1748,7 @@ journal only; if unsure, skip.
 add_journal directly in this flow; it is the final op of the single apply_changes call. \
 Draft the full journal raw and summary before the call and never save placeholder text. After \
 a failure, retry only the failed ops, once, in a second call.
-   Use slugs from the snapshot for existing tasks and do not re-read what the snapshot \
+   Use #ids from the snapshot for existing tasks and do not re-read what the snapshot \
 already holds. Keep any ✗ or ⚠ lines in the result for the closing report.
 
 5. The journal entry saved in step 4 has two parts, and both are run against the glossary: \
@@ -1925,8 +1926,8 @@ Follow where they take it, surfacing the relevant tasks weighted by urgency when
 a task needs a note, a priority, project or tag should change, or something new should be tracked, \
 write it straight away without asking for confirmation and without narrating the write. \
 When several changes come up together, send them in one apply_changes call.
-   - Refer to tasks by partial name or slug. Only rename changes a task's slug, and the old \
-slug keeps resolving afterwards.
+   - Refer to tasks by #id from the snapshot or listings; a partial name also works. \
+A task's #id never changes, even when it is renamed.
    - For a recurring task, done only advances its cycle.
    - The snapshot shows the state before the session; track your own writes on top of it \
 so you do not suggest a task already called done or show a moved date as unmoved.
