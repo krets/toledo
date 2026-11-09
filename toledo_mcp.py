@@ -388,7 +388,7 @@ TAGS = {"type": ["array", "string"], "items": {"type": "string"},
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    return [
+    tools = [
         types.Tool(
             name="list_tasks",
             description=(
@@ -846,7 +846,9 @@ async def list_tools() -> list[types.Tool]:
                 "about it, and the variants it gets misheard or misspelled as. Used to make the "
                 "glossary self-healing so the same term is never asked about twice. An existing "
                 "name is edited in place: variants are added to it and notes replace the old ones "
-                "only when given. Read the current glossary via the toledo://glossary resource."
+                "only when given. To fix a misspelled entry name, pass the existing name as 'name' and "
+                "the correct spelling as 'rename_to'. Read the current glossary via the "
+                "toledo://glossary resource."
             ),
             inputSchema={
                 "type": "object",
@@ -855,6 +857,7 @@ async def list_tools() -> list[types.Tool]:
                     "notes":    {"type": "string", "description": "Facts the user stated about it (who or what it is). Replaces the existing notes; omit to keep them"},
                     "variants": {"type": "array", "items": {"type": "string"}, "description": "Misheard or misspelled forms to read as this name; added to the existing ones"},
                     "remove_variants": {"type": "array", "items": {"type": "string"}, "description": "Variants to drop from the entry"},
+                    "rename_to": {"type": "string", "description": "Rename the entry named 'name' to this spelling; its notes and variants are kept"},
                 },
                 "required": ["name"],
             },
@@ -1028,6 +1031,27 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
     ]
+    _document_batch_ops(tools)
+    return tools
+
+
+def _op_signature(tool: types.Tool) -> str:
+    """'op(required, optional?)' from a tool's input schema."""
+    props = tool.inputSchema.get("properties", {})
+    required = tool.inputSchema.get("required", [])
+    parts = list(required) + [k + "?" for k in props if k not in required]
+    return f"{tool.name}({', '.join(parts)})"
+
+
+def _document_batch_ops(tools: list[types.Tool]) -> None:
+    """Append every op's argument names to apply_changes' description, so the
+    batch call is not a guessing game."""
+    by_name = {t.name: t for t in tools}
+    sigs = "; ".join(_op_signature(by_name[o]) for o in sorted(BATCH_OPS))
+    by_name["apply_changes"].description += (
+        f" Arguments per op (? = optional): {sigs}. Use each tool's own argument names, "
+        "e.g. create_task takes 'name', not 'task'."
+    )
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────
@@ -1482,8 +1506,16 @@ async def _dispatch(name: str, args: dict) -> list[types.TextContent]:
             gname, parsed_notes = db.parse_canonical(args["canonical"])
             gnotes = gnotes if gnotes is not None else (parsed_notes or None)
             variants += [args["term"]] if args.get("term") else []
+        entry_id, rename_to = None, (args.get("rename_to") or "").strip()
+        if rename_to:
+            with db.connect() as c:
+                row = db._glossary_row(c, gname, variants=False)
+            if not row:
+                raise ValueError(f"No glossary entry '{gname}' to rename")
+            entry_id, gname = row["id"], rename_to
         e = db.set_glossary_entry(gname, notes=gnotes, variants=variants,
-                                  remove_variants=args.get("remove_variants") or [])
+                                  remove_variants=args.get("remove_variants") or [],
+                                  entry_id=entry_id)
         verb = "added" if e["created"] else "updated" if e["changed"] else "unchanged"
         return ok(f"Glossary {verb}: {db.glossary_line(e)}")
 
